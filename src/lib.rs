@@ -1,16 +1,19 @@
-use std::borrow::Cow;
-use std::sync::Once;
-use std::sync::Mutex;
-use pyo3::prelude::*;
 use once_cell::sync::Lazy;
+use pyo3::prelude::*;
+use std::borrow::Cow;
+use std::sync::Mutex;
+use std::sync::Once;
 
 // Global static instances of tokenizers
-static CL100K_TOKENIZER: Lazy<Mutex<Option<&'static ::bpe_openai::Tokenizer>>> = 
+static CL100K_TOKENIZER: Lazy<Mutex<Option<&'static ::bpe_openai::Tokenizer>>> =
     Lazy::new(|| Mutex::new(None));
-static O200K_TOKENIZER: Lazy<Mutex<Option<&'static ::bpe_openai::Tokenizer>>> = 
+static O200K_TOKENIZER: Lazy<Mutex<Option<&'static ::bpe_openai::Tokenizer>>> =
+    Lazy::new(|| Mutex::new(None));
+static DEEPSEEK_TOKENIZER: Lazy<Mutex<Option<&'static ::bpe_openai::Tokenizer>>> =
     Lazy::new(|| Mutex::new(None));
 static CL100K_INIT: Once = Once::new();
 static O200K_INIT: Once = Once::new();
+static DEEPSEEK_INIT: Once = Once::new();
 
 #[pyclass]
 struct BytePairEncoding(&'static ::bpe::byte_pair_encoding::BytePairEncoding);
@@ -40,34 +43,38 @@ struct ParallelOptions {
 #[pymethods]
 impl ParallelOptions {
     #[new]
-    fn new(min_batch_size: Option<usize>, chunk_size: Option<usize>, max_threads: Option<usize>) -> Self {
+    fn new(
+        min_batch_size: Option<usize>,
+        chunk_size: Option<usize>,
+        max_threads: Option<usize>,
+    ) -> Self {
         let mut options = ::bpe_openai::ParallelOptions::default();
-        
+
         if let Some(min_batch_size) = min_batch_size {
             options.min_batch_size = min_batch_size;
         }
-        
+
         if let Some(chunk_size) = chunk_size {
             options.chunk_size = chunk_size;
         }
-        
+
         if let Some(max_threads) = max_threads {
             options.max_threads = max_threads;
         }
-        
+
         Self { inner: options }
     }
-    
+
     #[getter]
     fn min_batch_size(&self) -> usize {
         self.inner.min_batch_size
     }
-    
+
     #[getter]
     fn chunk_size(&self) -> usize {
         self.inner.chunk_size
     }
-    
+
     #[getter]
     fn max_threads(&self) -> usize {
         self.inner.max_threads
@@ -90,35 +97,43 @@ impl Tokenizer {
     fn encode(&self, input: Cow<str>) -> Vec<u32> {
         self.0.encode(&input)
     }
-    
+
     fn encode_batch(&self, texts: Vec<String>) -> PyResult<(Vec<Vec<u32>>, usize, f64)> {
         let str_texts: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let result = self.0.encode_batch(&str_texts);
         Ok((result.tokens, result.total_tokens, result.time_taken))
     }
-    
-    fn encode_batch_parallel(&self, texts: Vec<String>, options: Option<ParallelOptions>) -> PyResult<(Vec<Vec<u32>>, usize, f64, usize)> {
+
+    fn encode_batch_parallel(
+        &self,
+        texts: Vec<String>,
+        options: Option<ParallelOptions>,
+    ) -> PyResult<(Vec<Vec<u32>>, usize, f64, usize)> {
         let str_texts: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let rust_options = options.map(|opts| opts.inner);
         let tokens = self.0.encode_batch_parallel(&str_texts, rust_options);
         let total_tokens = tokens.iter().map(|t| t.len()).sum();
-        
+
         // Backward compatibility values
         let time_taken = 0.0;
         let threads_used = num_cpus::get();
-        
+
         Ok((tokens, total_tokens, time_taken, threads_used))
     }
 
     fn decode(&self, tokens: Vec<u32>) -> Option<String> {
         self.0.decode(&tokens)
     }
-    
+
     fn decode_batch(&self, batch_tokens: Vec<Vec<u32>>) -> Vec<Option<String>> {
         self.0.decode_batch(&batch_tokens)
     }
-    
-    fn decode_batch_parallel(&self, batch_tokens: Vec<Vec<u32>>, options: Option<ParallelOptions>) -> Vec<Option<String>> {
+
+    fn decode_batch_parallel(
+        &self,
+        batch_tokens: Vec<Vec<u32>>,
+        options: Option<ParallelOptions>,
+    ) -> Vec<Option<String>> {
         let rust_options = options.map(|opts| opts.inner);
         self.0.decode_batch_parallel(&batch_tokens, rust_options)
     }
@@ -135,8 +150,10 @@ fn openai(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ParallelOptions>()?;
     m.add_function(wrap_pyfunction!(cl100k_base, m)?)?;
     m.add_function(wrap_pyfunction!(o200k_base, m)?)?;
+    m.add_function(wrap_pyfunction!(deepseek_base, m)?)?;
     m.add_function(wrap_pyfunction!(is_cached_cl100k, m)?)?;
     m.add_function(wrap_pyfunction!(is_cached_o200k, m)?)?;
+    m.add_function(wrap_pyfunction!(is_cached_deepseek, m)?)?;
     m.add_function(wrap_pyfunction!(get_num_threads, m)?)?;
     Ok(())
 }
@@ -147,7 +164,7 @@ fn cl100k_base() -> PyResult<Tokenizer> {
         let mut tokenizer = CL100K_TOKENIZER.lock().unwrap();
         *tokenizer = Some(::bpe_openai::cl100k_base());
     });
-    
+
     let tokenizer_opt = CL100K_TOKENIZER.lock().unwrap();
     Ok(Tokenizer(*tokenizer_opt.as_ref().unwrap()))
 }
@@ -158,8 +175,19 @@ fn o200k_base() -> PyResult<Tokenizer> {
         let mut tokenizer = O200K_TOKENIZER.lock().unwrap();
         *tokenizer = Some(::bpe_openai::o200k_base());
     });
-    
+
     let tokenizer_opt = O200K_TOKENIZER.lock().unwrap();
+    Ok(Tokenizer(*tokenizer_opt.as_ref().unwrap()))
+}
+
+#[pyfunction]
+fn deepseek_base() -> PyResult<Tokenizer> {
+    DEEPSEEK_INIT.call_once(|| {
+        let mut tokenizer = DEEPSEEK_TOKENIZER.lock().unwrap();
+        *tokenizer = Some(::bpe_openai::deepseek_base());
+    });
+
+    let tokenizer_opt = DEEPSEEK_TOKENIZER.lock().unwrap();
     Ok(Tokenizer(*tokenizer_opt.as_ref().unwrap()))
 }
 
@@ -176,6 +204,12 @@ fn is_cached_o200k() -> PyResult<bool> {
 }
 
 #[pyfunction]
+fn is_cached_deepseek() -> PyResult<bool> {
+    let tokenizer = DEEPSEEK_TOKENIZER.lock().unwrap();
+    Ok(tokenizer.is_some())
+}
+
+#[pyfunction]
 fn get_num_threads() -> PyResult<usize> {
     Ok(rayon::current_num_threads())
 }
@@ -184,9 +218,9 @@ fn get_num_threads() -> PyResult<usize> {
 #[pymodule]
 fn bpe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BytePairEncoding>()?;
-    
+
     let openai = pyo3::wrap_pymodule!(openai);
     m.add_wrapped(openai)?;
-    
+
     Ok(())
 }

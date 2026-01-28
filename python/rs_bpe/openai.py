@@ -12,25 +12,38 @@ Project Dependencies:
     This file uses: rs_bpe.bpe.openai: The Rust OpenAI tokenizer implementation
 """
 
-__all__ = ["Tokenizer", "cl100k_base", "is_cached_cl100k", "is_cached_o200k", "o200k_base"]
+__all__ = [
+    "Tokenizer",
+    "cl100k_base",
+    "deepseek_base",
+    "is_cached_cl100k",
+    "is_cached_deepseek",
+    "is_cached_o200k",
+    "o200k_base",
+]
 
 try:
+
     class _OpenAIProxy:
         def __getattr__(self, name):
             import importlib
+
             openai_module = importlib.import_module("rs_bpe.bpe.openai")
             return getattr(openai_module, name)
-    
+
     openai = _OpenAIProxy()
-    
+
     from rs_bpe.bpe.openai import (
         Tokenizer,
         cl100k_base,
+        deepseek_base,
         is_cached_cl100k,
+        is_cached_deepseek,
         is_cached_o200k,
         o200k_base,
     )
 except ImportError:
     import sys
+
     print("Error: Failed to import OpenAI tokenizer module", file=sys.stderr)
     print("Make sure to build the extension with: maturin develop", file=sys.stderr)

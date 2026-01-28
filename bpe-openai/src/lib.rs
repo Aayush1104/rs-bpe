@@ -1,17 +1,17 @@
-use std::sync::LazyLock;
-use std::sync::Arc;
 use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::LazyLock;
 
 use bpe::byte_pair_encoding::BytePairEncoding;
 use either::Either;
+use once_cell::sync::Lazy;
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use regex_automata::{
     meta::{BuildError, Regex},
     util::captures::Captures,
     Anchored, Input,
 };
-use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
-use once_cell::sync::Lazy;
 
 // Global thread pool optimized for tokenization workloads
 static TOKENIZER_POOL: Lazy<rayon::ThreadPool> = Lazy::new(|| {
@@ -32,8 +32,8 @@ thread_local! {
 fn get_optimal_thread_count() -> usize {
     let physical_cores = num_cpus::get_physical();
     let logical_cores = num_cpus::get();
-    
-    // Heuristic: For tokenization, using physical core count often gives better 
+
+    // Heuristic: For tokenization, using physical core count often gives better
     // performance due to reduced cache contention
     std::cmp::max(1, std::cmp::min(physical_cores, logical_cores / 2))
 }
@@ -63,6 +63,16 @@ static BPE_O200K_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
         "\\s*[\\r\\n]+",
         "\\s+$",
     ].join("|");
+    let pat2 = "\\s+\\s";
+    let pat3 = "\\s+";
+    Tokenizer::new_lookahead(bpe, &[(&pat1, false), (pat2, true), (pat3, false)])
+        .expect("valid regex")
+});
+
+static DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bpe_deepseek_base.dict"));
+    let bpe = rmp_serde::from_slice(bytes).expect("valid bpe data");
+    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+";
     let pat2 = "\\s+\\s";
     let pat3 = "\\s+";
     Tokenizer::new_lookahead(bpe, &[(&pat1, false), (pat2, true), (pat3, false)])
@@ -185,26 +195,26 @@ impl Tokenizer {
     /// A `BatchEncodeResult` containing the encoded tokens and timing information
     pub fn encode_batch(&self, texts: &[&str]) -> BatchEncodeResult {
         use std::time::Instant;
-        
+
         let start = Instant::now();
         let mut tokens = Vec::with_capacity(texts.len());
         let mut total_tokens = 0;
-        
+
         for &text in texts {
             let encoded = self.encode(text);
             total_tokens += encoded.len();
             tokens.push(encoded);
         }
-        
+
         let time_taken = start.elapsed().as_secs_f64();
-        
+
         BatchEncodeResult {
             tokens,
             total_tokens,
             time_taken,
         }
     }
-    
+
     /// Encodes multiple texts in parallel using multiple threads.
     ///
     /// This method provides improved performance when encoding larger batches of text.
@@ -219,13 +229,17 @@ impl Tokenizer {
     ///
     /// Struct containing the encoded tokens and performance statistics
     #[allow(unused_variables)]
-    pub fn encode_batch_parallel(&self, texts: &[&str], options: Option<ParallelOptions>) -> Vec<Vec<u32>> {
+    pub fn encode_batch_parallel(
+        &self,
+        texts: &[&str],
+        options: Option<ParallelOptions>,
+    ) -> Vec<Vec<u32>> {
         let options = options.unwrap_or_default();
-        
+
         // Debug print for start time and batch size
         // println!("Rust DEBUG: Starting parallel encode for {} texts", texts.len());
         let start_time = std::time::Instant::now();
-        
+
         // If batch is too small, use regular sequential processing
         if texts.len() < options.min_batch_size {
             // println!("Rust DEBUG: Batch too small, using sequential processing");
@@ -234,7 +248,7 @@ impl Tokenizer {
             // println!("Rust DEBUG: Sequential completed in {:?}", elapsed);
             return sequential_result.tokens;
         }
-        
+
         // Determine thread count based on options
         let available_threads = rayon::current_num_threads();
         let threads_used = if options.max_threads > 0 {
@@ -242,68 +256,70 @@ impl Tokenizer {
         } else {
             available_threads
         };
-        
+
         // println!("Rust DEBUG: Using {} threads of {} available", threads_used, available_threads);
-        
+
         // Create immutable reference for thread safety
         let tokenizer = Arc::new(self.clone());
-        
+
         // Pre-allocate result vector to avoid resizing
         let mut tokens = Vec::with_capacity(texts.len());
-        
+
         if options.use_thread_pool {
             // Use our optimized thread pool
             // println!("Rust DEBUG: Using optimized thread pool");
             let pool_start = std::time::Instant::now();
-            
+
             TOKENIZER_POOL.install(|| {
                 // Process all inputs in parallel and collect results
-                tokens = texts.par_iter()
+                tokens = texts
+                    .par_iter()
                     .map(|&text| {
                         let tokenizer = &tokenizer;
                         tokenizer.encode_cached(text)
                     })
                     .collect();
             });
-            
+
             // println!("Rust DEBUG: Thread pool processing took {:?}", pool_start.elapsed());
         } else {
             // Use default Rayon parallelism
             // println!("Rust DEBUG: Using default Rayon parallelism");
             let rayon_start = std::time::Instant::now();
-            
-            tokens = texts.par_iter()
+
+            tokens = texts
+                .par_iter()
                 .map(|&text| {
                     let tokenizer = &tokenizer;
                     tokenizer.encode(text)
                 })
                 .collect();
-                
+
             // println!("Rust DEBUG: Rayon processing took {:?}", rayon_start.elapsed());
         }
-        
+
         let total_tokens: usize = tokens.iter().map(|t| t.len()).sum();
         let elapsed = start_time.elapsed();
         // println!("Rust DEBUG: Total parallel encode completed in {:?}, produced {} tokens", elapsed, total_tokens);
-        
+
         tokens
     }
-    
+
     /// Optimized encoding with thread-local caching for parallel workloads
     fn encode_cached(&self, text: &str) -> Vec<u32> {
         if let Some(pre) = &self.pre {
             let mut result = Vec::new();
-            
+
             // Use thread-local cache for the chunks
             TEXT_CHUNK_CACHE.with(|cache| {
                 let mut chunks = cache.borrow_mut();
                 chunks.clear();
-                
+
                 // Collect all chunks using split instead of matches
                 for piece in pre.split(text) {
                     chunks.push(piece.as_bytes().to_vec());
                 }
-                
+
                 // Process all chunks
                 for piece in chunks.iter() {
                     if let Some(token) = self.bpe.token(piece) {
@@ -314,7 +330,7 @@ impl Tokenizer {
                     }
                 }
             });
-            
+
             result
         } else {
             self.bpe.encode(text)
@@ -326,7 +342,7 @@ impl Tokenizer {
     pub fn decode(&self, tokens: &[u32]) -> Option<String> {
         String::from_utf8(self.bpe.decode_tokens(tokens)).ok()
     }
-    
+
     /// Decodes multiple token sequences efficiently in a single batch operation.
     ///
     /// # Arguments
@@ -335,11 +351,12 @@ impl Tokenizer {
     /// # Returns
     /// A vector of optional strings (None for invalid UTF-8)
     pub fn decode_batch(&self, batch_tokens: &[Vec<u32>]) -> Vec<Option<String>> {
-        batch_tokens.iter()
+        batch_tokens
+            .iter()
             .map(|tokens| self.decode(tokens))
             .collect()
     }
-    
+
     /// Decodes multiple token sequences in parallel for improved performance.
     ///
     /// # Arguments
@@ -350,24 +367,29 @@ impl Tokenizer {
     /// # Returns
     ///
     /// Vector of decoded strings (None for invalid UTF-8)
-    pub fn decode_batch_parallel(&self, batch_tokens: &[Vec<u32>], options: Option<ParallelOptions>) -> Vec<Option<String>> {
+    pub fn decode_batch_parallel(
+        &self,
+        batch_tokens: &[Vec<u32>],
+        options: Option<ParallelOptions>,
+    ) -> Vec<Option<String>> {
         let options = options.unwrap_or_default();
-        
+
         // If batch is too small, use regular sequential processing
         if batch_tokens.len() < options.min_batch_size {
             return self.decode_batch(batch_tokens);
         }
-        
+
         // Clone for parallel usage
         let tokenizer = Arc::new(self.clone());
-        
+
         let mut results = Vec::with_capacity(batch_tokens.len());
-        
+
         if options.use_thread_pool {
             // Use our optimized thread pool
             TOKENIZER_POOL.install(|| {
                 // Process in parallel
-                results = batch_tokens.par_iter()
+                results = batch_tokens
+                    .par_iter()
                     .map(|tokens| {
                         let tokenizer = &tokenizer;
                         tokenizer.decode(tokens)
@@ -376,14 +398,15 @@ impl Tokenizer {
             });
         } else {
             // Use default Rayon parallelism
-            results = batch_tokens.par_iter()
+            results = batch_tokens
+                .par_iter()
                 .map(|tokens| {
                     let tokenizer = &tokenizer;
                     tokenizer.decode(tokens)
                 })
                 .collect();
         }
-        
+
         results
     }
 
@@ -476,6 +499,10 @@ pub fn o200k_base() -> &'static Tokenizer {
     &BPE_O200K_BASE
 }
 
+pub fn deepseek_base() -> &'static Tokenizer {
+    &DEEPSEEK_BASE
+}
+
 #[cfg(test)]
 mod tests {
     use bpe::byte_pair_encoding::{create_test_string, select_test_string};
@@ -513,26 +540,36 @@ mod tests {
         assert_eq!(cl100k_base().count_till_limit("abcabcabc", 3), Some(3));
         assert_eq!(cl100k_base().count_till_limit("abcabcabcabc", 3), None);
     }
-    
+
     #[test]
     fn test_batch_encoding() {
         let tok = cl100k_base();
-        let texts = ["Hello world", "Testing batch encoding", "This is a longer text to encode"];
-        
+        let texts = [
+            "Hello world",
+            "Testing batch encoding",
+            "This is a longer text to encode",
+        ];
+
         // Test batch encoding
         let batch_result = tok.encode_batch(&texts);
-        
+
         // Verify each result matches individual encoding
         for (i, &text) in texts.iter().enumerate() {
             let individual = tok.encode(text);
-            assert_eq!(batch_result.tokens[i], individual, "batch encoding mismatch for text #{i}");
+            assert_eq!(
+                batch_result.tokens[i], individual,
+                "batch encoding mismatch for text #{i}"
+            );
         }
-        
+
         // Verify total count
         let expected_total = texts.iter().map(|&t| tok.encode(t).len()).sum::<usize>();
-        assert_eq!(batch_result.total_tokens, expected_total, "total token count mismatch");
+        assert_eq!(
+            batch_result.total_tokens, expected_total,
+            "total token count mismatch"
+        );
     }
-    
+
     #[test]
     fn test_parallel_batch_encoding() {
         let tok = cl100k_base();
@@ -544,29 +581,46 @@ mod tests {
             "With multiple threads and longer texts",
             "To ensure everything works correctly",
             "And the results match the sequential version",
-            "Even with many different inputs"
+            "Even with many different inputs",
         ];
-        
+
         // Test parallel batch encoding with default options
         let parallel_result = tok.encode_batch_parallel(&texts, None);
-        
+
         // Test sequential batch encoding for comparison
         let sequential_result = tok.encode_batch(&texts);
-        
+
         // Verify parallel processing produces the same results as sequential
-        assert_eq!(parallel_result.len(), sequential_result.tokens.len(), 
-                   "parallel and sequential results should have the same number of outputs");
-        
-        for (i, (parallel, sequential)) in parallel_result.iter().zip(sequential_result.tokens.iter()).enumerate() {
-            assert_eq!(parallel, sequential, "parallel and sequential results differ for text #{}", i);
+        assert_eq!(
+            parallel_result.len(),
+            sequential_result.tokens.len(),
+            "parallel and sequential results should have the same number of outputs"
+        );
+
+        for (i, (parallel, sequential)) in parallel_result
+            .iter()
+            .zip(sequential_result.tokens.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                parallel, sequential,
+                "parallel and sequential results differ for text #{}",
+                i
+            );
         }
-        
-        assert_eq!(parallel_result.iter().map(|t| t.len()).sum::<usize>(), sequential_result.total_tokens,
-                   "parallel and sequential total token counts should match");
-        
+
+        assert_eq!(
+            parallel_result.iter().map(|t| t.len()).sum::<usize>(),
+            sequential_result.total_tokens,
+            "parallel and sequential total token counts should match"
+        );
+
         // Verify we actually used multiple threads when appropriate
         if texts.len() >= ParallelOptions::default().min_batch_size {
-            assert!(parallel_result.len() > 1, "should have used multiple threads");
+            assert!(
+                parallel_result.len() > 1,
+                "should have used multiple threads"
+            );
         }
     }
 }

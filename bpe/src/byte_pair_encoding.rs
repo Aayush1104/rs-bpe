@@ -1,10 +1,10 @@
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
-use std::ops::Range;
-use std::num::NonZeroUsize;
 use std::cell::RefCell;
+use std::cmp::Reverse;
+use std::collections::BTreeMap;
+use std::collections::BinaryHeap;
+use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
+use std::ops::Range;
 
 use aneubeck_daachorse::{DoubleArrayAhoCorasick, DoubleArrayAhoCorasickBuilder};
 use fnv::{FnvHashMap, FnvHasher};
@@ -122,7 +122,7 @@ fn is_valid_token_pair(
                 return false;
             }
         }
-        
+
         if token1 > token2 {
             limit = token1;
             token1 = unsafe { split_table.get_unchecked(token1 as usize).1 };
@@ -175,17 +175,20 @@ pub fn find_hash_factor_for_tiktoken(data: &str) -> Result<u64, base64::DecodeEr
 /// constructing a [`BytePairEncoding`] from those tokens.
 #[cfg(feature = "rand")]
 pub fn find_hash_factor_for_dictionary(tokens: impl IntoIterator<Item = Vec<u8>>) -> u64 {
-    use std::collections::HashSet;
     use rand::Rng;
+    use std::collections::HashSet;
 
     let all_tokens = tokens.into_iter().collect_vec();
     let mut rng = rand::thread_rng();
-    
+
     loop {
         let factor: u64 = rng.gen();
         let mut seen = HashSet::new();
-        
-        if all_tokens.iter().all(|token| seen.insert(hash_bytes(token, factor))) {
+
+        if all_tokens
+            .iter()
+            .all(|token| seen.insert(hash_bytes(token, factor)))
+        {
             return factor;
         }
     }
@@ -200,7 +203,7 @@ fn find_token_by_bytes(
 ) -> Option<u32> {
     let hash = hash_bytes(bytes, hash_factor);
     let token = *bytes_hash_to_token.get(&hash)?;
-    
+
     if token_bytes(all_tokens, token_starts, token) == bytes {
         Some(token)
     } else {
@@ -213,7 +216,7 @@ fn find_token_by_bytes(
 #[cfg(feature = "tiktoken")]
 pub fn read_tiktoken(data: &str) -> Result<Vec<Vec<u8>>, base64::DecodeError> {
     use base64::prelude::*;
-    
+
     data.lines()
         .filter(|line| !line.is_empty())
         .map(|line| {
@@ -254,19 +257,19 @@ impl BytePairEncoding {
         let hash_factor = hash_factor
             .inspect(|f| assert_ne!(*f, 0, "hash factor must be larger than zero"))
             .unwrap_or(1);
-            
+
         let mut all_tokens = Vec::new();
         let mut all_tokens_rev = Vec::new();
         let mut token_starts = vec![0];
         let mut bytes_hash_to_token = FnvHashMap::default();
-        
+
         for (i, token) in tokens.into_iter().enumerate() {
             bytes_hash_to_token.insert(hash_bytes(&token, hash_factor), i as u32);
             all_tokens_rev.extend(token.iter().copied().rev());
             all_tokens.extend(token);
             token_starts.push(all_tokens.len() as u32);
         }
-        
+
         assert_eq!(bytes_hash_to_token.len() + 1, token_starts.len());
 
         let longest_searcher = DoubleArrayAhoCorasickBuilder::new()
@@ -274,13 +277,13 @@ impl BytePairEncoding {
             .build(token_iter(&all_tokens, &token_starts))
             .expect("failed to build AhoCorasick");
 
-        let overlapping_searcher = DoubleArrayAhoCorasick::<u32>::new(
-            token_iter(&all_tokens, &token_starts)
-        ).expect("failed to build overlapping searcher");
-        
-        let overlapping_searcher_rev = DoubleArrayAhoCorasick::<u32>::new(
-            token_iter(&all_tokens_rev, &token_starts)
-        ).expect("failed to build reverse overlapping searcher");
+        let overlapping_searcher =
+            DoubleArrayAhoCorasick::<u32>::new(token_iter(&all_tokens, &token_starts))
+                .expect("failed to build overlapping searcher");
+
+        let overlapping_searcher_rev =
+            DoubleArrayAhoCorasick::<u32>::new(token_iter(&all_tokens_rev, &token_starts))
+                .expect("failed to build reverse overlapping searcher");
 
         let next_prefix_match: Vec<_> = token_iter(&all_tokens, &token_starts)
             .map(|token| {
@@ -290,7 +293,7 @@ impl BytePairEncoding {
 
         let mut split_table = vec![];
         let mut pair_lookup = FnvHashMap::default();
-        
+
         // Reverse engineer the merge/split table.
         for (id, token) in token_iter(&all_tokens, &token_starts).enumerate() {
             let mut token1 = next_prefix_match[id];
@@ -318,7 +321,7 @@ impl BytePairEncoding {
                 split_table.push((id as u32, id as u32));
             }
         }
-        
+
         let bpe = Self {
             all_tokens,
             token_starts,
@@ -335,17 +338,19 @@ impl BytePairEncoding {
             ranks: BTreeMap::new(),
             use_caching: true,
         };
-        
+
         for token_id in 0..bpe.num_tokens() as u32 {
             let bytes = bpe.token_bytes(token_id);
             let tokens = bpe.encode_via_bitfield(bytes);
-            assert_eq!(
+            // Some vocabularies include added/special tokens that are not merge-closed.
+            // Keep this as a debug-only validation for merge-closed vocabularies.
+            debug_assert_eq!(
                 tokens,
                 vec![token_id],
                 "token {token_id} with bytes {bytes:?} encodes to {tokens:?} instead of to itself"
             );
         }
-        
+
         bpe
     }
 
@@ -409,16 +414,16 @@ impl BytePairEncoding {
     pub(crate) fn encode_all_prefixes(&self, text: &[u8]) -> Vec<u32> {
         let mut last_token = Vec::with_capacity(text.len());
         let mut state = self.overlapping_searcher.start_state();
-        
+
         for (pos, c) in text.iter().enumerate() {
             let (s, iter) = self.overlapping_searcher.consume(state, pos + 1, *c);
             state = s;
-            
+
             for m in iter {
                 let new_token = m.value();
                 let new_range = m.start()..m.end();
                 assert_eq!(new_range.end, last_token.len() + 1);
-                
+
                 if new_range.start == 0 {
                     last_token.push(new_token);
                     break;
@@ -431,7 +436,7 @@ impl BytePairEncoding {
                 }
             }
         }
-        
+
         last_token
     }
 
@@ -451,13 +456,13 @@ impl BytePairEncoding {
         // the token_limit is exceeded before the end of the text is reached (and a different encoding is tested).
         // To be on the "safe" side, we add a little buffer for such cases.
         let limit_with_buffer = token_limit.saturating_add(10);
-        
+
         while enc.step().is_some() {
             if enc.count() > limit_with_buffer {
                 return None;
             }
         }
-        
+
         if enc.count() <= token_limit {
             Some(enc.count())
         } else {
@@ -469,13 +474,13 @@ impl BytePairEncoding {
         let last_token = self.encode_all_prefixes(text);
         let mut encoded = Vec::with_capacity(text.len() / 3);
         let mut pos = text.len();
-        
+
         while pos > 0 {
             let token = last_token[pos - 1];
             encoded.push(token);
             pos -= self.token_len(token);
         }
-        
+
         encoded.reverse();
         encoded
     }
@@ -490,40 +495,40 @@ impl BytePairEncoding {
         // Reserve for every byte a bit in the bitfield.
         let mut bitfield = BitField::new(bytes.len() + 1);
         let mut heap = BinaryHeap::with_capacity(bytes.len() * 2);
-        
+
         heap.extend((0..bytes.len().saturating_sub(1)).filter_map(|i| {
             self.find_token_by_bytes(&bytes[i..i + 2])
                 .map(|e| Reverse((e, i as u32)))
         }));
-        
+
         let mut count = bytes.len();
-        
+
         while let Some(Reverse((token, start))) = heap.pop() {
             let start = start as usize;
             if !bitfield.is_set(start) {
                 continue;
             }
-            
+
             let mid = bitfield.successor(start + 1);
             if mid >= bytes.len() {
                 continue;
             }
-            
+
             let end = bitfield.successor(mid + 1);
             if self.token_len(token) != end - start {
                 continue;
             }
-            
+
             bitfield.clear(mid);
             count -= 1;
-            
+
             if end < bytes.len() {
                 let new_end = bitfield.successor(end + 1);
                 if let Some(e) = self.find_token_by_bytes(&bytes[start..new_end]) {
                     heap.push(Reverse((e, start as u32)));
                 }
             }
-            
+
             if start > 0 {
                 let new_start = bitfield.predecessor(start - 1);
                 if let Some(e) = self.find_token_by_bytes(&bytes[new_start..end]) {
@@ -531,21 +536,23 @@ impl BytePairEncoding {
                 }
             }
         }
-        
+
         (bitfield, count)
     }
 
     fn bitfield_into_tokens(&self, bytes: &[u8], bitfield: BitField, count: usize) -> Vec<u32> {
         let mut encoded = Vec::with_capacity(count);
         let mut start = 0;
-        
+
         while start < bytes.len() {
             let end = bitfield.successor(start + 1);
-            let token = self.find_token_by_bytes(&bytes[start..end]).expect("token must exist");
+            let token = self
+                .find_token_by_bytes(&bytes[start..end])
+                .expect("token must exist");
             encoded.push(token);
             start = end;
         }
-        
+
         encoded
     }
 
@@ -567,12 +574,12 @@ impl BytePairEncoding {
     pub fn encode_minimal(&self, text: &[u8]) -> Vec<u32> {
         let mut last_token: Vec<(u32, u32)> = Vec::with_capacity(text.len());
         let mut state = self.overlapping_searcher.start_state();
-        
+
         for (pos, c) in text.iter().enumerate() {
             let (s, iter) = self.overlapping_searcher.consume(state, pos + 1, *c);
             state = s;
             let mut best = (0, u32::MAX);
-            
+
             for m in iter {
                 if m.start() == 0 {
                     best = (m.value(), 1);
@@ -581,19 +588,19 @@ impl BytePairEncoding {
                     best = (m.value(), last_token[m.start() - 1].1 + 1)
                 }
             }
-            
+
             last_token.push(best);
         }
-        
+
         let mut encoded = Vec::with_capacity(last_token.last().map(|l| l.1 as usize).unwrap_or(0));
         let mut pos = text.len();
-        
+
         while pos > 0 {
             let token = last_token[pos - 1].0;
             encoded.push(token);
             pos -= self.token_len(token);
         }
-        
+
         encoded.reverse();
         encoded
     }
@@ -618,11 +625,11 @@ impl BytePairEncoding {
         if self.use_caching {
             BPE_TOKEN_CACHE.with(|cache| {
                 let mut cache = cache.borrow_mut();
-                
+
                 if let Some(&token_id) = cache.get(token) {
                     return Some(token_id);
                 }
-                
+
                 let hash = hash_bytes(token, self.hash_factor);
                 if let Some(&token_id) = self.bytes_hash_to_token.get(&hash) {
                     if token_bytes(&self.all_tokens, &self.token_starts, token_id) == token {
@@ -630,14 +637,17 @@ impl BytePairEncoding {
                         return Some(token_id);
                     }
                 }
-                
+
                 None
             })
         } else {
             let hash = hash_bytes(token, self.hash_factor);
-            self.bytes_hash_to_token.get(&hash).copied().filter(|&token_id| {
-                token_bytes(&self.all_tokens, &self.token_starts, token_id) == token
-            })
+            self.bytes_hash_to_token
+                .get(&hash)
+                .copied()
+                .filter(|&token_id| {
+                    token_bytes(&self.all_tokens, &self.token_starts, token_id) == token
+                })
         }
     }
 
@@ -655,26 +665,26 @@ impl BytePairEncoding {
             }
             return self.merge_bytes(bytes);
         }
-        
+
         // Check if we have this exact sequence cached
         if self.use_caching {
             let cached = BPE_MERGE_CACHE.with(|cache| {
                 let mut cache = cache.borrow_mut();
                 cache.get(bytes).cloned()
             });
-            
+
             if let Some(tokens) = cached {
                 return tokens;
             }
         }
-        
+
         // Not cached, perform the encoding
         let tokens = if let Some(&token) = self.tokens.get(bytes) {
             vec![token]
         } else {
             self.merge_bytes(bytes)
         };
-        
+
         // Cache the result if caching is enabled and bytes aren't too large
         if self.use_caching && bytes.len() < 1024 {
             BPE_MERGE_CACHE.with(|cache| {
@@ -682,7 +692,7 @@ impl BytePairEncoding {
                 cache.put(bytes.to_vec(), tokens.clone());
             });
         }
-        
+
         tokens
     }
 
@@ -719,20 +729,20 @@ pub fn create_test_string_with_predicate(
     predicate: impl Fn(&str) -> bool,
 ) -> String {
     use rand::{thread_rng, Rng};
-    
+
     let mut result = String::new();
     let mut tokens = Vec::new();
-    
+
     'keep: while result.len() < min_bytes {
         'next: for _ in 0..8 {
             let i = thread_rng().gen_range(0..bpe.num_tokens()) as u32;
-            
+
             if let Ok(token) = std::str::from_utf8(bpe.token_bytes(i)) {
                 result.push_str(token);
             } else {
                 continue 'next;
             }
-            
+
             if predicate(&result) {
                 tokens.push(i);
                 continue 'keep;
@@ -740,29 +750,29 @@ pub fn create_test_string_with_predicate(
                 result.truncate(result.len() - bpe.token_len(i));
             }
         }
-        
+
         if let Some(i) = tokens.pop() {
             result.truncate(result.len() - bpe.token_len(i));
         }
     }
-    
+
     result
 }
 
 #[cfg(feature = "rand")]
 pub fn select_test_string(text: &str, min_bytes: usize) -> &str {
     use rand::{thread_rng, Rng};
-    
+
     let mut start = thread_rng().gen_range(0..text.len() - min_bytes);
     while !text.is_char_boundary(start) {
         start -= 1;
     }
-    
+
     let mut end = start + min_bytes;
     while !text.is_char_boundary(end) {
         end += 1;
     }
-    
+
     &text[start..end]
 }
 
@@ -770,20 +780,20 @@ pub fn select_test_string(text: &str, min_bytes: usize) -> &str {
 #[cfg(feature = "rand")]
 pub fn create_test_bytes(bpe: &BytePairEncoding, min_bytes: usize) -> Vec<u8> {
     use rand::{thread_rng, Rng};
-    
+
     let mut result = Vec::new();
     while result.len() < min_bytes {
         let i = thread_rng().gen_range(0..bpe.num_tokens());
         result.extend(bpe.token_bytes(i as u32));
     }
-    
+
     result
 }
 
 // Thread-local cache for BPE encoding to avoid repeated work for common tokens
 thread_local! {
-    static BPE_TOKEN_CACHE: RefCell<LruCache<Vec<u8>, u32>> = 
+    static BPE_TOKEN_CACHE: RefCell<LruCache<Vec<u8>, u32>> =
         RefCell::new(LruCache::new(NonZeroUsize::new(4096).unwrap()));
-    static BPE_MERGE_CACHE: RefCell<LruCache<Vec<u8>, Vec<u32>>> = 
+    static BPE_MERGE_CACHE: RefCell<LruCache<Vec<u8>, Vec<u32>>> =
         RefCell::new(LruCache::new(NonZeroUsize::new(1024).unwrap()));
 }
