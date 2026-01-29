@@ -17,6 +17,9 @@ use regex_automata::{
     Anchored, Input,
 };
 
+pub mod normalizer;
+
+pub use normalizer::{Normalizable, NormalizedString};
 // Global thread pool optimized for tokenization workloads
 static TOKENIZER_POOL: Lazy<rayon::ThreadPool> = Lazy::new(|| {
     ThreadPoolBuilder::new()
@@ -52,7 +55,7 @@ static BPE_CL100K_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
     let pat1 = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+$";
     let pat2 = "\\s+\\s";
     let pat3 = "\\s+";
-    Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)])
+    Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)], false)
         .expect("valid regex")
 });
 
@@ -69,7 +72,7 @@ static BPE_O200K_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
     ].join("|");
     let pat2 = "\\s+\\s";
     let pat3 = "\\s+";
-    Tokenizer::new_lookahead(bpe, &[(&pat1, false), (pat2, true), (pat3, false)])
+    Tokenizer::new_lookahead(bpe, &[(&pat1, false), (pat2, true), (pat3, false)], false)
         .expect("valid regex")
 });
 
@@ -80,7 +83,7 @@ static BPE_DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
     let pat2 = "\\s+\\s";
     let pat3 = "\\s+";
     let mut tokenizer =
-        Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)])
+        Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)], false)
             .expect("valid regex");
     let special_tokens: HashMap<String, u32> = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -107,6 +110,8 @@ pub struct Tokenizer {
     pub bpe: BytePairEncoding,
     /// The pattern regex used to split the input.
     pub pre: Option<Pretokenizer>,
+    /// Indicates whether the input should be normalized with NFC.
+    nfc: bool,
     special_tokens: Option<SpecialTokens>,
 }
 
@@ -176,11 +181,12 @@ impl Default for ParallelOptions {
 impl Tokenizer {
     /// Build a tokenizer with an optional pretokenization regex pattern.
     #[allow(clippy::result_large_err)]
-    pub fn new(bpe: BytePairEncoding, pat: Option<&str>) -> Result<Self, BuildError> {
+    pub fn new(bpe: BytePairEncoding, pat: Option<&str>, nfc: bool) -> Result<Self, BuildError> {
         let pre = pat.map(Pretokenizer::new).transpose()?;
         Ok(Self {
             bpe,
             pre,
+            nfc,
             special_tokens: None,
         })
     }
@@ -191,11 +197,13 @@ impl Tokenizer {
     pub fn new_lookahead(
         bpe: BytePairEncoding,
         patterns: &[(&str, bool)],
+        nfc: bool,
     ) -> Result<Self, BuildError> {
         let pre = Some(Pretokenizer::new_lookahead(patterns)?);
         Ok(Self {
             bpe,
             pre,
+            nfc,
             special_tokens: None,
         })
     }
@@ -228,9 +236,10 @@ impl Tokenizer {
 
     /// Count the number of tokens produced when encoding the text. Applies pre-tokenization
     /// before counting.
-    pub fn count(&self, text: &str) -> usize {
+    pub fn count<'a, I: Normalizable<'a>>(&self, text: I) -> usize {
+        let text = self.normalize(text);
         let mut total = 0;
-        self.for_each_special_segment(text, None, |segment| match segment {
+        self.for_each_special_segment(text.as_str(), None, |segment| match segment {
             Segment::Text(segment) => {
                 total += self
                     .split(segment)
@@ -245,9 +254,28 @@ impl Tokenizer {
     /// Returns the token count iff the total token count stays below the specified token_limit.
     /// Otherwise, it returns none. This function can be faster than [`Self::count`]` when the
     /// token limit is much smaller than the provided text. Applies pre-tokenization before counting.
-    pub fn count_till_limit(&self, text: &str, token_limit: usize) -> Option<usize> {
+    pub fn count_till_limit<'a, I: Normalizable<'a>>(
+        &self,
+        text: I,
+        token_limit: usize,
+    ) -> Option<usize> {
+        let text = self.normalize(text);
+        self.count_till_limit_normalized(&text, token_limit)
+    }
+
+    /// Returns the token count iff the total token count stays below the specified token_limit.
+    /// Otherwise, it returns none. This function can be faster than [`Self::count`]` when the
+    /// token limit is much smaller than the provided text. Applies pre-tokenization before counting.
+    ///
+    /// Note: This function assumes that the text is already normalized, so that this function can run
+    /// in roughly O(token_limit) time.
+    pub fn count_till_limit_normalized(
+        &self,
+        text: &NormalizedString<'_>,
+        token_limit: usize,
+    ) -> Option<usize> {
         if self.special_tokens.is_none() {
-            return self.split(text).try_fold(0, |consumed, piece| {
+            return self.split(text.as_str()).try_fold(0, |consumed, piece| {
                 self.bpe
                     .count_till_limit(piece.as_bytes(), token_limit - consumed)
                     .map(|piece_count| consumed + piece_count)
@@ -258,12 +286,15 @@ impl Tokenizer {
         let mut last = 0;
         let matcher = &self.special_tokens.as_ref().unwrap().matcher;
 
-        for m in matcher.leftmost_find_iter(text.as_bytes()) {
+        for m in matcher.leftmost_find_iter(text.as_str().as_bytes()) {
             let start = m.start();
             let end = m.end();
             if start > last {
-                consumed =
-                    self.count_till_limit_piece(&text[last..start], token_limit, consumed)?;
+                consumed = self.count_till_limit_piece(
+                    &text.as_str()[last..start],
+                    token_limit,
+                    consumed,
+                )?;
             }
             if consumed + 1 > token_limit {
                 return None;
@@ -272,8 +303,9 @@ impl Tokenizer {
             last = end;
         }
 
-        if last < text.len() {
-            consumed = self.count_till_limit_piece(&text[last..], token_limit, consumed)?;
+        if last < text.as_str().len() {
+            consumed =
+                self.count_till_limit_piece(&text.as_str()[last..], token_limit, consumed)?;
         }
 
         Some(consumed)
@@ -281,9 +313,14 @@ impl Tokenizer {
 
     /// Returns the tokens for the encoding of the given text. Applies pre-tokenization before
     /// encoding.
-    pub fn encode(&self, text: &str, allowed_special: Option<&HashSet<&str>>) -> Vec<u32> {
+    pub fn encode<'a, I: Normalizable<'a>>(
+        &self,
+        text: I,
+        allowed_special: Option<&HashSet<&str>>,
+    ) -> Vec<u32> {
+        let text = self.normalize(text);
         let mut encoded = Vec::new();
-        self.for_each_special_segment(text, allowed_special, |segment| match segment {
+        self.for_each_special_segment(text.as_str(), allowed_special, |segment| match segment {
             Segment::Text(segment) => self.encode_text_segment(segment, &mut encoded),
             Segment::Special(token) => encoded.push(token),
         });
@@ -418,8 +455,9 @@ impl Tokenizer {
 
     /// Optimized encoding with thread-local caching for parallel workloads
     fn encode_cached(&self, text: &str, allowed_special: Option<&HashSet<&str>>) -> Vec<u32> {
+        let text = self.normalize(text);
         let mut encoded = Vec::new();
-        self.for_each_special_segment(text, allowed_special, |segment| match segment {
+        self.for_each_special_segment(text.as_str(), allowed_special, |segment| match segment {
             Segment::Text(segment) => self.encode_text_segment_cached(segment, &mut encoded),
             Segment::Special(token) => encoded.push(token),
         });
@@ -519,6 +557,12 @@ impl Tokenizer {
             Some(pre) => Either::Left(pre.split(text)),
             None => Either::Right(std::iter::once(text)),
         }
+    }
+
+    /// Returns the normalized text if the tokenizer requires normalization.
+    /// If the input was already normalized, this function is a noop.
+    pub fn normalize<'a, I: Normalizable<'a>>(&self, text: I) -> NormalizedString<'a> {
+        text.normalize(self.nfc)
     }
 
     fn for_each_special_segment<'a, F>(

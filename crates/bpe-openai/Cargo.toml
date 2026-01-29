@@ -22,6 +22,7 @@ rayon = { workspace = true }
 once_cell = { workspace = true }
 num_cpus = { workspace = true }
 serde_json = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 bpe = { version = "0.1.0", path = "../bpe", features = ["rand"] }

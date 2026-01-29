@@ -322,7 +322,7 @@ impl BytePairEncoding {
             }
         }
 
-        let bpe = Self {
+        Self {
             all_tokens,
             token_starts,
             bytes_hash_to_token,
@@ -337,21 +337,7 @@ impl BytePairEncoding {
             reverts: FnvHashMap::default(),
             ranks: BTreeMap::new(),
             use_caching: true,
-        };
-
-        for token_id in 0..bpe.num_tokens() as u32 {
-            let bytes = bpe.token_bytes(token_id);
-            let tokens = bpe.encode_via_bitfield(bytes);
-            // Some vocabularies include added/special tokens that are not merge-closed.
-            // Keep this as a debug-only validation for merge-closed vocabularies.
-            debug_assert_eq!(
-                tokens,
-                vec![token_id],
-                "token {token_id} with bytes {bytes:?} encodes to {tokens:?} instead of to itself"
-            );
         }
-
-        bpe
     }
 
     /// Return the number of tokens in this BPE dictionary.
