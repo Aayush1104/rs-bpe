@@ -171,6 +171,11 @@ impl Tokenizer {
         }
         Ok(Some(dict.into()))
     }
+
+    #[getter]
+    fn vocab_size(&self) -> usize {
+        self.0.bpe.num_tokens()
+    }
 }
 
 /// BPE tokenizer interface
