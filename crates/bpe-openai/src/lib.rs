@@ -83,7 +83,7 @@ static BPE_DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
     let pat2 = "\\s+\\s";
     let pat3 = "\\s+";
     let mut tokenizer =
-        Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)], false)
+        Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)], true)
             .expect("valid regex");
     let special_tokens: HashMap<String, u32> = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
