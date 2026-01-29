@@ -37,7 +37,7 @@ def load_tokenizer_json(source: str) -> dict:
 
 
 def convert_hf_to_tiktoken(
-    tokenizer_json: dict, include_special_tokens: bool = False
+    tokenizer_json: dict,
 ) -> tuple[list[tuple[bytes, int]], dict[str, int]]:
     """
     Convert a HuggingFace tokenizer.json to tiktoken format.
@@ -79,73 +79,16 @@ def convert_hf_to_tiktoken(
     # Method: use merge order to determine rank
     # merges earlier in the list get lower ranks
 
-    # First, base byte tokens (0-255) get the highest priority
-    token_to_rank: dict[str, int] = {}
-    current_rank = 0
-
-    # Base byte tokens
-    for i in range(256):
-        byte_token = bytes([i])
-        # HuggingFace may represent bytes in different ways
-        # Try several possible representations
-        possible_representations = [
-            byte_token.decode("latin-1"),  # direct byte
-            f"<0x{i:02X}>",  # <0x00> format
-            chr(i) if i < 128 and chr(i).isprintable() else None,
-        ]
-
-        for repr in possible_representations:
-            if repr and repr in vocab:
-                if repr not in token_to_rank:
-                    token_to_rank[repr] = current_rank
-                    current_rank += 1
-                break
-
-    # Then add merged tokens in merge order
-    for merge in merges:
-        parts = merge.split(" ")
-        if len(parts) == 2:
-            merged_token = "".join(parts)
-            if merged_token in vocab and merged_token not in token_to_rank:
-                token_to_rank[merged_token] = current_rank
-                current_rank += 1
-
-    # Add remaining vocab tokens (in original ID order)
-    remaining = [
-        (token, id)
-        for token, id in vocab.items()
-        if token not in token_to_rank and id not in special_token_ids
-    ]
-    remaining.sort(key=lambda x: x[1])
-
-    for token, _ in remaining:
-        if token not in token_to_rank:
-            token_to_rank[token] = current_rank
-            current_rank += 1
-
-    # 5. Convert to bytes and build output
-    vocab_list: list[tuple[bytes, int]] = []
-
-    for token_str, rank in token_to_rank.items():
-        token_id = vocab.get(token_str)
-        if token_id is None or token_id in special_token_ids:
-            continue
-
-        # Convert token string to bytes
+    tokens: list[tuple[bytes, int]] = []
+    for token_str, token_id in vocab.items():
         token_bytes = convert_token_to_bytes(token_str, model)
-        if token_bytes is not None:
-            vocab_list.append((token_bytes, rank))
+        if token_bytes is None:
+            raise ValueError(f"Failed to convert token to bytes: {token_str}")
+        tokens.append((token_bytes, token_id))
 
-    # Sort by rank
-    vocab_list.sort(key=lambda x: x[1])
-
-    # Optional: include special tokens
-    if include_special_tokens:
-        for token_str in special_tokens:
-            token_bytes = token_str.encode("utf-8")
-            vocab_list.append((token_bytes, len(vocab_list)))
-
-    return vocab_list, special_tokens
+    # Sort tokens by their IDs (ranks)
+    tokens.sort(key=lambda x: x[1])
+    return tokens, special_tokens
 
 
 def convert_token_to_bytes(token_str: str, model: dict) -> bytes | None:
@@ -259,11 +202,6 @@ def main():
     parser.add_argument(
         "--special-tokens", "-s", help="Output path for special tokens JSON"
     )
-    parser.add_argument(
-        "--include-special",
-        action="store_true",
-        help="Include special tokens in main vocab file",
-    )
 
     args = parser.parse_args()
 
@@ -271,9 +209,7 @@ def main():
     tokenizer_json = load_tokenizer_json(args.source)
 
     print("Converting to tiktoken format...")
-    vocab_list, special_tokens = convert_hf_to_tiktoken(
-        tokenizer_json, include_special_tokens=args.include_special
-    )
+    vocab_list, special_tokens = convert_hf_to_tiktoken(tokenizer_json)
 
     write_tiktoken_file(vocab_list, args.output, compress=args.compress)
 

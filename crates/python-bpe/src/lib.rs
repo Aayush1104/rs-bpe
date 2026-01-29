@@ -2,6 +2,7 @@ use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::Once;
 
@@ -77,24 +78,60 @@ impl Tokenizer {
         self.0.count_till_limit(input.as_ref(), limit)
     }
 
-    fn encode(&self, input: Cow<str>) -> Vec<u32> {
-        self.0.encode(input.as_ref())
+    #[pyo3(signature = (input, allowed_special = None))]
+    fn encode(&self, input: Cow<str>, allowed_special: Option<Vec<String>>) -> Vec<u32> {
+        let allowed_special =
+            allowed_special.map(|items| items.into_iter().collect::<HashSet<String>>());
+        let allowed_special_refs = allowed_special.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str())
+                .collect::<HashSet<&str>>()
+        });
+        self.0.encode(input.as_ref(), allowed_special_refs.as_ref())
     }
 
-    fn encode_batch(&self, texts: Vec<String>) -> PyResult<(Vec<Vec<u32>>, usize, f64)> {
+    #[pyo3(signature = (texts, allowed_special = None))]
+    fn encode_batch(
+        &self,
+        texts: Vec<String>,
+        allowed_special: Option<Vec<String>>,
+    ) -> PyResult<(Vec<Vec<u32>>, usize, f64)> {
         let str_texts: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-        let result = self.0.encode_batch(&str_texts);
+        let allowed_special =
+            allowed_special.map(|items| items.into_iter().collect::<HashSet<String>>());
+        let allowed_special_refs = allowed_special.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str())
+                .collect::<HashSet<&str>>()
+        });
+        let result = self
+            .0
+            .encode_batch(&str_texts, allowed_special_refs.as_ref());
         Ok((result.tokens, result.total_tokens, result.time_taken))
     }
 
+    #[pyo3(signature = (texts, options = None, allowed_special = None))]
     fn encode_batch_parallel(
         &self,
         texts: Vec<String>,
         options: Option<ParallelOptions>,
+        allowed_special: Option<Vec<String>>,
     ) -> PyResult<(Vec<Vec<u32>>, usize, f64, usize)> {
         let str_texts: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let rust_options = options.map(|opts| opts.inner);
-        let tokens = self.0.encode_batch_parallel(&str_texts, rust_options);
+        let allowed_special =
+            allowed_special.map(|items| items.into_iter().collect::<HashSet<String>>());
+        let allowed_special_refs = allowed_special.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str())
+                .collect::<HashSet<&str>>()
+        });
+        let tokens =
+            self.0
+                .encode_batch_parallel(&str_texts, rust_options, allowed_special_refs.as_ref());
         let total_tokens = tokens.iter().map(|t| t.len()).sum();
 
         // Backward compatibility values

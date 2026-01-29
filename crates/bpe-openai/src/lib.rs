@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
@@ -229,7 +230,7 @@ impl Tokenizer {
     /// before counting.
     pub fn count(&self, text: &str) -> usize {
         let mut total = 0;
-        self.for_each_special_segment(text, |segment| match segment {
+        self.for_each_special_segment(text, None, |segment| match segment {
             Segment::Text(segment) => {
                 total += self
                     .split(segment)
@@ -280,9 +281,9 @@ impl Tokenizer {
 
     /// Returns the tokens for the encoding of the given text. Applies pre-tokenization before
     /// encoding.
-    pub fn encode(&self, text: &str) -> Vec<u32> {
+    pub fn encode(&self, text: &str, allowed_special: Option<&HashSet<&str>>) -> Vec<u32> {
         let mut encoded = Vec::new();
-        self.for_each_special_segment(text, |segment| match segment {
+        self.for_each_special_segment(text, allowed_special, |segment| match segment {
             Segment::Text(segment) => self.encode_text_segment(segment, &mut encoded),
             Segment::Special(token) => encoded.push(token),
         });
@@ -298,7 +299,11 @@ impl Tokenizer {
     ///
     /// # Returns
     /// A `BatchEncodeResult` containing the encoded tokens and timing information
-    pub fn encode_batch(&self, texts: &[&str]) -> BatchEncodeResult {
+    pub fn encode_batch(
+        &self,
+        texts: &[&str],
+        allowed_special: Option<&HashSet<&str>>,
+    ) -> BatchEncodeResult {
         use std::time::Instant;
 
         let start = Instant::now();
@@ -306,7 +311,7 @@ impl Tokenizer {
         let mut total_tokens = 0;
 
         for &text in texts {
-            let encoded = self.encode(text);
+            let encoded = self.encode(text, allowed_special);
             total_tokens += encoded.len();
             tokens.push(encoded);
         }
@@ -338,6 +343,7 @@ impl Tokenizer {
         &self,
         texts: &[&str],
         options: Option<ParallelOptions>,
+        allowed_special: Option<&HashSet<&str>>,
     ) -> Vec<Vec<u32>> {
         let options = options.unwrap_or_default();
 
@@ -348,7 +354,7 @@ impl Tokenizer {
         // If batch is too small, use regular sequential processing
         if texts.len() < options.min_batch_size {
             // println!("Rust DEBUG: Batch too small, using sequential processing");
-            let sequential_result = self.encode_batch(texts);
+            let sequential_result = self.encode_batch(texts, allowed_special);
             let elapsed = start_time.elapsed();
             // println!("Rust DEBUG: Sequential completed in {:?}", elapsed);
             return sequential_result.tokens;
@@ -381,7 +387,7 @@ impl Tokenizer {
                     .par_iter()
                     .map(|&text| {
                         let tokenizer = &tokenizer;
-                        tokenizer.encode_cached(text)
+                        tokenizer.encode_cached(text, allowed_special)
                     })
                     .collect();
             });
@@ -396,7 +402,7 @@ impl Tokenizer {
                 .par_iter()
                 .map(|&text| {
                     let tokenizer = &tokenizer;
-                    tokenizer.encode(text)
+                    tokenizer.encode(text, allowed_special)
                 })
                 .collect();
 
@@ -411,9 +417,9 @@ impl Tokenizer {
     }
 
     /// Optimized encoding with thread-local caching for parallel workloads
-    fn encode_cached(&self, text: &str) -> Vec<u32> {
+    fn encode_cached(&self, text: &str, allowed_special: Option<&HashSet<&str>>) -> Vec<u32> {
         let mut encoded = Vec::new();
-        self.for_each_special_segment(text, |segment| match segment {
+        self.for_each_special_segment(text, allowed_special, |segment| match segment {
             Segment::Text(segment) => self.encode_text_segment_cached(segment, &mut encoded),
             Segment::Special(token) => encoded.push(token),
         });
@@ -515,26 +521,87 @@ impl Tokenizer {
         }
     }
 
-    fn for_each_special_segment<'a, F>(&self, text: &'a str, mut on_segment: F)
-    where
+    fn for_each_special_segment<'a, F>(
+        &self,
+        text: &'a str,
+        allowed_special: Option<&HashSet<&str>>,
+        mut on_segment: F,
+    ) where
         F: FnMut(Segment<'a>),
     {
-        if let Some(specials) = &self.special_tokens {
-            let mut last = 0;
-            for m in specials.matcher.leftmost_find_iter(text.as_bytes()) {
-                let start = m.start();
-                let end = m.end();
-                if start > last {
-                    on_segment(Segment::Text(&text[last..start]));
+        let Some(specials) = &self.special_tokens else {
+            on_segment(Segment::Text(text));
+            return;
+        };
+
+        let allowed_ids = allowed_special.map(|allowed| {
+            let mut ids = HashSet::with_capacity(allowed.len());
+            for token in allowed {
+                if let Some(id) = specials.token_to_id.get(*token) {
+                    ids.insert(*id);
                 }
-                on_segment(Segment::Special(m.value()));
-                last = end;
             }
+            ids
+        });
+
+        if let Some(allowed_ids) = &allowed_ids {
+            if allowed_ids.is_empty() {
+                on_segment(Segment::Text(text));
+                return;
+            }
+
+            let mut last = 0;
+            let mut cursor = 0;
+            while cursor < text.len() {
+                let Some(m) = specials
+                    .matcher
+                    .leftmost_find_iter(&text.as_bytes()[cursor..])
+                    .next()
+                else {
+                    break;
+                };
+                let start = cursor + m.start();
+                let end = cursor + m.end();
+                let id = m.value();
+
+                if allowed_ids.contains(&id) {
+                    if start > last {
+                        on_segment(Segment::Text(&text[last..start]));
+                    }
+                    on_segment(Segment::Special(id));
+                    last = end;
+                    cursor = end;
+                } else {
+                    let next = text[start..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    cursor = start + next;
+                    if cursor < last {
+                        cursor = last;
+                    }
+                }
+            }
+
             if last < text.len() {
                 on_segment(Segment::Text(&text[last..]));
             }
-        } else {
-            on_segment(Segment::Text(text));
+            return;
+        }
+
+        let mut last = 0;
+        for m in specials.matcher.leftmost_find_iter(text.as_bytes()) {
+            let start = m.start();
+            let end = m.end();
+            if start > last {
+                on_segment(Segment::Text(&text[last..start]));
+            }
+            on_segment(Segment::Special(m.value()));
+            last = end;
+        }
+        if last < text.len() {
+            on_segment(Segment::Text(&text[last..]));
         }
     }
 
@@ -711,6 +778,7 @@ fn build_special_tokens(
 #[cfg(test)]
 mod tests {
     use bpe::byte_pair_encoding::{create_test_string, select_test_string};
+    use std::collections::HashSet;
     use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton, CoreBPE};
 
     use super::*;
@@ -731,7 +799,7 @@ mod tests {
         for bytes in [10, 100, 1000, 10_000] {
             for _ in 0..32 {
                 let text = select_test_string(&text, bytes);
-                let tokens = tok.encode(text);
+                let tokens = tok.encode(text, None);
                 let tiktokens = tiktoken.encode_ordinary(text).to_vec();
                 assert_eq!(tokens, tiktokens, "encoding mismatch for {text:?}");
             }
@@ -756,11 +824,11 @@ mod tests {
         ];
 
         // Test batch encoding
-        let batch_result = tok.encode_batch(&texts);
+        let batch_result = tok.encode_batch(&texts, None);
 
         // Verify each result matches individual encoding
         for (i, &text) in texts.iter().enumerate() {
-            let individual = tok.encode(text);
+            let individual = tok.encode(text, None);
             assert_eq!(
                 batch_result.tokens[i], individual,
                 "batch encoding mismatch for text #{i}"
@@ -768,7 +836,10 @@ mod tests {
         }
 
         // Verify total count
-        let expected_total = texts.iter().map(|&t| tok.encode(t).len()).sum::<usize>();
+        let expected_total = texts
+            .iter()
+            .map(|&t| tok.encode(t, None).len())
+            .sum::<usize>();
         assert_eq!(
             batch_result.total_tokens, expected_total,
             "total token count mismatch"
@@ -790,10 +861,10 @@ mod tests {
         ];
 
         // Test parallel batch encoding with default options
-        let parallel_result = tok.encode_batch_parallel(&texts, None);
+        let parallel_result = tok.encode_batch_parallel(&texts, None, None);
 
         // Test sequential batch encoding for comparison
-        let sequential_result = tok.encode_batch(&texts);
+        let sequential_result = tok.encode_batch(&texts, None);
 
         // Verify parallel processing produces the same results as sequential
         assert_eq!(
@@ -839,11 +910,11 @@ mod tests {
             .expect("special tokens should be valid");
 
         let text = format!("hello{special_token}world");
-        let mut expected = cl100k_base().encode("hello");
+        let mut expected = cl100k_base().encode("hello", None);
         expected.push(special_id);
-        expected.extend(cl100k_base().encode("world"));
+        expected.extend(cl100k_base().encode("world", None));
 
-        assert_eq!(tok.encode(&text), expected);
+        assert_eq!(tok.encode(&text, None), expected);
         assert_eq!(tok.count(&text), expected.len());
         assert_eq!(tok.decode(&expected).as_deref(), Some(text.as_str()));
         assert_eq!(
@@ -851,5 +922,31 @@ mod tests {
             Some(expected.len())
         );
         assert_eq!(tok.count_till_limit(&text, expected.len() - 1), None);
+    }
+
+    #[test]
+    fn test_allowed_special() {
+        let end_token = "<|end|>";
+        let start_token = "<|start|>";
+        let end_id = 1_000_000;
+        let start_id = 1_000_001;
+        let tok = cl100k_base()
+            .clone()
+            .with_special_tokens([
+                (end_token.to_string(), end_id),
+                (start_token.to_string(), start_id),
+            ])
+            .expect("special tokens should be valid");
+
+        let text = format!("a{end_token}b{start_token}c");
+
+        let mut allowed = HashSet::new();
+        allowed.insert(end_token);
+
+        let mut expected = cl100k_base().encode("a", None);
+        expected.push(end_id);
+        expected.extend(cl100k_base().encode(&format!("b{start_token}c"), None));
+
+        assert_eq!(tok.encode(&text, Some(&allowed)), expected);
     }
 }
