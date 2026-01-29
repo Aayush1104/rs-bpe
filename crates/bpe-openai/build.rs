@@ -10,17 +10,17 @@ fn main() {
     serialize_tiktoken_bpe(
         "cl100k_base",
         include_bytes!("data/cl100k_base.tiktoken.gz"),
-        14286567991940181869,
+        17846336922010275747,
     );
     serialize_tiktoken_bpe(
         "o200k_base",
         include_bytes!("data/o200k_base.tiktoken.gz"),
-        14064530798818711771,
+        17846336922010275747,
     );
     serialize_tiktoken_bpe(
         "deepseek_base",
         include_bytes!("data/deepseek_base.tiktoken.gz"),
-        15308084094301570617,
+        1517468908905573648,
     );
     println!("cargo::rerun-if-changed=build.rs");
 }

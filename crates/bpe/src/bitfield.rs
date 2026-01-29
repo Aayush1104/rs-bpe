@@ -8,7 +8,7 @@ impl BitField {
     /// All bits are initialized to 1.
     pub(crate) fn new(bits: usize) -> Self {
         Self {
-            bitfield: vec![u64::MAX; (bits + 63) / 64],
+            bitfield: vec![u64::MAX; bits.div_ceil(64)],
         }
     }
 
@@ -25,14 +25,14 @@ impl BitField {
     pub(crate) fn successor(&self, bit: usize) -> usize {
         let (mut word_idx, bit_idx) = (bit / 64, bit % 64);
         let word = self.bitfield[word_idx] >> bit_idx;
-        
+
         if word != 0 {
             word.trailing_zeros() as usize + bit
         } else {
             loop {
                 word_idx += 1;
                 let word = self.bitfield[word_idx];
-                
+
                 if word != 0 {
                     break word.trailing_zeros() as usize + word_idx * 64;
                 }
@@ -43,14 +43,14 @@ impl BitField {
     pub(crate) fn predecessor(&self, bit: usize) -> usize {
         let (mut word_idx, bit_idx) = (bit / 64, bit % 64);
         let word = self.bitfield[word_idx] << (63 - bit_idx);
-        
+
         if word != 0 {
             bit - word.leading_zeros() as usize
         } else {
             loop {
                 word_idx -= 1;
                 let word = self.bitfield[word_idx];
-                
+
                 if word != 0 {
                     break word_idx * 64 + 63 - word.leading_zeros() as usize;
                 }

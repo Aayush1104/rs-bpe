@@ -1,5 +1,6 @@
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::borrow::Cow;
 use std::sync::Mutex;
 use std::sync::Once;
@@ -14,24 +15,6 @@ static DEEPSEEK_TOKENIZER: Lazy<Mutex<Option<&'static ::bpe_openai::Tokenizer>>>
 static CL100K_INIT: Once = Once::new();
 static O200K_INIT: Once = Once::new();
 static DEEPSEEK_INIT: Once = Once::new();
-
-#[pyclass]
-struct BytePairEncoding(&'static ::bpe::byte_pair_encoding::BytePairEncoding);
-
-#[pymethods]
-impl BytePairEncoding {
-    fn count(&self, input: &[u8]) -> usize {
-        self.0.count(input)
-    }
-
-    fn encode_via_backtracking(&self, input: &[u8]) -> Vec<u32> {
-        self.0.encode_via_backtracking(input)
-    }
-
-    fn decode_tokens(&self, tokens: Vec<u32>) -> Vec<u8> {
-        self.0.decode_tokens(&tokens)
-    }
-}
 
 /// Python wrapper for ParallelOptions
 #[pyclass]
@@ -87,15 +70,15 @@ struct Tokenizer(&'static ::bpe_openai::Tokenizer);
 #[pymethods]
 impl Tokenizer {
     fn count(&self, input: &str) -> usize {
-        self.0.count(&input)
+        self.0.count(input)
     }
 
     fn count_till_limit(&self, input: Cow<str>, limit: usize) -> Option<usize> {
-        self.0.count_till_limit(&input, limit)
+        self.0.count_till_limit(input.as_ref(), limit)
     }
 
     fn encode(&self, input: Cow<str>) -> Vec<u32> {
-        self.0.encode(&input)
+        self.0.encode(input.as_ref())
     }
 
     fn encode_batch(&self, texts: Vec<String>) -> PyResult<(Vec<Vec<u32>>, usize, f64)> {
@@ -138,14 +121,24 @@ impl Tokenizer {
         self.0.decode_batch_parallel(&batch_tokens, rust_options)
     }
 
-    fn bpe(&self) -> BytePairEncoding {
-        BytePairEncoding(&self.0.bpe)
+    #[getter]
+    fn special_tokens(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let special_tokens = match self.0.special_tokens() {
+            Some(tokens) => tokens,
+            None => return Ok(None),
+        };
+
+        let dict = PyDict::new(py);
+        for (token, id) in special_tokens.iter() {
+            dict.set_item(token, *id)?;
+        }
+        Ok(Some(dict.into()))
     }
 }
 
-/// OpenAI tokenizer interface
+/// BPE tokenizer interface
 #[pymodule]
-fn openai(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn bpe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Tokenizer>()?;
     m.add_class::<ParallelOptions>()?;
     m.add_function(wrap_pyfunction!(cl100k_base, m)?)?;
@@ -166,7 +159,7 @@ fn cl100k_base() -> PyResult<Tokenizer> {
     });
 
     let tokenizer_opt = CL100K_TOKENIZER.lock().unwrap();
-    Ok(Tokenizer(*tokenizer_opt.as_ref().unwrap()))
+    Ok(Tokenizer(tokenizer_opt.as_ref().unwrap()))
 }
 
 #[pyfunction]
@@ -177,7 +170,7 @@ fn o200k_base() -> PyResult<Tokenizer> {
     });
 
     let tokenizer_opt = O200K_TOKENIZER.lock().unwrap();
-    Ok(Tokenizer(*tokenizer_opt.as_ref().unwrap()))
+    Ok(Tokenizer(tokenizer_opt.as_ref().unwrap()))
 }
 
 #[pyfunction]
@@ -188,7 +181,7 @@ fn deepseek_base() -> PyResult<Tokenizer> {
     });
 
     let tokenizer_opt = DEEPSEEK_TOKENIZER.lock().unwrap();
-    Ok(Tokenizer(*tokenizer_opt.as_ref().unwrap()))
+    Ok(Tokenizer(tokenizer_opt.as_ref().unwrap()))
 }
 
 #[pyfunction]
@@ -212,15 +205,4 @@ fn is_cached_deepseek() -> PyResult<bool> {
 #[pyfunction]
 fn get_num_threads() -> PyResult<usize> {
     Ok(rayon::current_num_threads())
-}
-
-/// BPE implementation in Rust
-#[pymodule]
-fn bpe(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<BytePairEncoding>()?;
-
-    let openai = pyo3::wrap_pymodule!(openai);
-    m.add_wrapped(openai)?;
-
-    Ok(())
 }

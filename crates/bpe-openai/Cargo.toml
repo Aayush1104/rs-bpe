@@ -1,0 +1,35 @@
+[package]
+name = "bpe-openai"
+version.workspace = true
+edition.workspace = true
+description = "Prebuilt ridiculously fast byte-pair encoders for OpenAI."
+repository.workspace = true
+license.workspace = true
+keywords = ["tokenizer", "algorithm", "encoding", "bpe"]
+categories = ["algorithms", "data-structures", "encoding", "science"]
+
+[lib]
+crate-type = ["lib", "staticlib"]
+bench = false
+
+[dependencies]
+bpe = { version = "0.1.0", path = "../bpe" }
+aneubeck-daachorse = { workspace = true }
+either = { workspace = true }
+regex-automata = { workspace = true }
+rmp-serde = { workspace = true }
+rayon = { workspace = true }
+once_cell = { workspace = true }
+num_cpus = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+bpe = { version = "0.1.0", path = "../bpe", features = ["rand"] }
+tiktoken-rs = { workspace = true }
+
+[build-dependencies]
+base64 = { workspace = true }
+bpe = { version = "0.1.0", path = "../bpe", features = ["tiktoken"] }
+flate2 = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

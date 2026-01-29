@@ -1,7 +1,10 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
+use aneubeck_daachorse::errors::DaachorseError;
+use aneubeck_daachorse::{DoubleArrayAhoCorasick, DoubleArrayAhoCorasickBuilder, MatchKind};
 use bpe::byte_pair_encoding::BytePairEncoding;
 use either::Either;
 use once_cell::sync::Lazy;
@@ -69,14 +72,24 @@ static BPE_O200K_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
         .expect("valid regex")
 });
 
-static DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
+static BPE_DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bpe_deepseek_base.dict"));
     let bpe = rmp_serde::from_slice(bytes).expect("valid bpe data");
-    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+";
+    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+";
     let pat2 = "\\s+\\s";
     let pat3 = "\\s+";
-    Tokenizer::new_lookahead(bpe, &[(&pat1, false), (pat2, true), (pat3, false)])
-        .expect("valid regex")
+    let mut tokenizer =
+        Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)])
+            .expect("valid regex");
+    let special_tokens: HashMap<String, u32> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/deepseek_base_special.json"
+    )))
+    .expect("valid deepseek special tokens json");
+    tokenizer
+        .set_special_tokens(special_tokens)
+        .expect("valid special tokens");
+    tokenizer
 });
 
 pub use bpe::*;
@@ -93,6 +106,7 @@ pub struct Tokenizer {
     pub bpe: BytePairEncoding,
     /// The pattern regex used to split the input.
     pub pre: Option<Pretokenizer>,
+    special_tokens: Option<SpecialTokens>,
 }
 
 #[derive(Clone)]
@@ -112,6 +126,26 @@ pub struct BatchEncodeResult {
     pub total_tokens: usize,
     /// Time taken for the batch operation in seconds
     pub time_taken: f64,
+}
+
+#[derive(Debug)]
+pub enum SpecialTokenError {
+    EmptyToken,
+    DuplicateToken(String),
+    DuplicateId(u32),
+    Automaton(DaachorseError),
+}
+
+#[derive(Clone)]
+struct SpecialTokens {
+    matcher: DoubleArrayAhoCorasick<u32>,
+    id_to_token: HashMap<u32, String>,
+    token_to_id: HashMap<String, u32>,
+}
+
+enum Segment<'a> {
+    Text(&'a str),
+    Special(u32),
 }
 
 /// Processing options for parallel encoding
@@ -143,7 +177,11 @@ impl Tokenizer {
     #[allow(clippy::result_large_err)]
     pub fn new(bpe: BytePairEncoding, pat: Option<&str>) -> Result<Self, BuildError> {
         let pre = pat.map(Pretokenizer::new).transpose()?;
-        Ok(Self { bpe, pre })
+        Ok(Self {
+            bpe,
+            pre,
+            special_tokens: None,
+        })
     }
 
     /// Build a tokenizer with pretokenization regex patterns. If the boolean for a pattern is true,
@@ -154,34 +192,101 @@ impl Tokenizer {
         patterns: &[(&str, bool)],
     ) -> Result<Self, BuildError> {
         let pre = Some(Pretokenizer::new_lookahead(patterns)?);
-        Ok(Self { bpe, pre })
+        Ok(Self {
+            bpe,
+            pre,
+            special_tokens: None,
+        })
+    }
+
+    pub fn with_special_tokens(
+        mut self,
+        special_tokens: impl IntoIterator<Item = (String, u32)>,
+    ) -> Result<Self, SpecialTokenError> {
+        self.set_special_tokens(special_tokens)?;
+        Ok(self)
+    }
+
+    pub fn set_special_tokens(
+        &mut self,
+        special_tokens: impl IntoIterator<Item = (String, u32)>,
+    ) -> Result<(), SpecialTokenError> {
+        self.special_tokens = build_special_tokens(special_tokens)?;
+        Ok(())
+    }
+
+    pub fn clear_special_tokens(&mut self) {
+        self.special_tokens = None;
+    }
+
+    pub fn special_tokens(&self) -> Option<&HashMap<String, u32>> {
+        self.special_tokens
+            .as_ref()
+            .map(|specials| &specials.token_to_id)
     }
 
     /// Count the number of tokens produced when encoding the text. Applies pre-tokenization
     /// before counting.
     pub fn count(&self, text: &str) -> usize {
-        self.split(text)
-            .map(|piece| self.bpe.count(piece.as_bytes()))
-            .sum()
+        let mut total = 0;
+        self.for_each_special_segment(text, |segment| match segment {
+            Segment::Text(segment) => {
+                total += self
+                    .split(segment)
+                    .map(|piece| self.bpe.count(piece.as_bytes()))
+                    .sum::<usize>();
+            }
+            Segment::Special(_) => total += 1,
+        });
+        total
     }
 
     /// Returns the token count iff the total token count stays below the specified token_limit.
     /// Otherwise, it returns none. This function can be faster than [`Self::count`]` when the
     /// token limit is much smaller than the provided text. Applies pre-tokenization before counting.
     pub fn count_till_limit(&self, text: &str, token_limit: usize) -> Option<usize> {
-        self.split(text).try_fold(0, |consumed, piece| {
-            self.bpe
-                .count_till_limit(piece.as_bytes(), token_limit - consumed)
-                .map(|piece_count| consumed + piece_count)
-        })
+        if self.special_tokens.is_none() {
+            return self.split(text).try_fold(0, |consumed, piece| {
+                self.bpe
+                    .count_till_limit(piece.as_bytes(), token_limit - consumed)
+                    .map(|piece_count| consumed + piece_count)
+            });
+        }
+
+        let mut consumed = 0;
+        let mut last = 0;
+        let matcher = &self.special_tokens.as_ref().unwrap().matcher;
+
+        for m in matcher.leftmost_find_iter(text.as_bytes()) {
+            let start = m.start();
+            let end = m.end();
+            if start > last {
+                consumed =
+                    self.count_till_limit_piece(&text[last..start], token_limit, consumed)?;
+            }
+            if consumed + 1 > token_limit {
+                return None;
+            }
+            consumed += 1;
+            last = end;
+        }
+
+        if last < text.len() {
+            consumed = self.count_till_limit_piece(&text[last..], token_limit, consumed)?;
+        }
+
+        Some(consumed)
     }
 
     /// Returns the tokens for the encoding of the given text. Applies pre-tokenization before
     /// encoding.
     pub fn encode(&self, text: &str) -> Vec<u32> {
-        self.split(text)
-            .flat_map(|piece| self.bpe.encode_via_backtracking(piece.as_bytes()))
-            .collect()
+        let mut encoded = Vec::new();
+        self.for_each_special_segment(text, |segment| match segment {
+            Segment::Text(segment) => self.encode_text_segment(segment, &mut encoded),
+            Segment::Special(token) => encoded.push(token),
+        });
+        encoded
     }
 
     /// Encodes multiple texts efficiently in a single batch operation.
@@ -307,40 +412,31 @@ impl Tokenizer {
 
     /// Optimized encoding with thread-local caching for parallel workloads
     fn encode_cached(&self, text: &str) -> Vec<u32> {
-        if let Some(pre) = &self.pre {
-            let mut result = Vec::new();
-
-            // Use thread-local cache for the chunks
-            TEXT_CHUNK_CACHE.with(|cache| {
-                let mut chunks = cache.borrow_mut();
-                chunks.clear();
-
-                // Collect all chunks using split instead of matches
-                for piece in pre.split(text) {
-                    chunks.push(piece.as_bytes().to_vec());
-                }
-
-                // Process all chunks
-                for piece in chunks.iter() {
-                    if let Some(token) = self.bpe.token(piece) {
-                        result.push(token);
-                    } else {
-                        let mut encoded = self.bpe.encode_bytes(piece);
-                        result.append(&mut encoded);
-                    }
-                }
-            });
-
-            result
-        } else {
-            self.bpe.encode(text)
-        }
+        let mut encoded = Vec::new();
+        self.for_each_special_segment(text, |segment| match segment {
+            Segment::Text(segment) => self.encode_text_segment_cached(segment, &mut encoded),
+            Segment::Special(token) => encoded.push(token),
+        });
+        encoded
     }
 
     /// Returns the text corresponding to the given encoding if it is valid UTF-8. Otherwise,
     /// returns none.
     pub fn decode(&self, tokens: &[u32]) -> Option<String> {
-        String::from_utf8(self.bpe.decode_tokens(tokens)).ok()
+        match &self.special_tokens {
+            Some(specials) => {
+                let mut bytes = Vec::with_capacity(tokens.len() * 4);
+                for &token in tokens {
+                    if let Some(text) = specials.id_to_token.get(&token) {
+                        bytes.extend_from_slice(text.as_bytes());
+                    } else {
+                        bytes.extend_from_slice(self.bpe.token_bytes(token));
+                    }
+                }
+                String::from_utf8(bytes).ok()
+            }
+            None => String::from_utf8(self.bpe.decode_tokens(tokens)).ok(),
+        }
     }
 
     /// Decodes multiple token sequences efficiently in a single batch operation.
@@ -417,6 +513,77 @@ impl Tokenizer {
             Some(pre) => Either::Left(pre.split(text)),
             None => Either::Right(std::iter::once(text)),
         }
+    }
+
+    fn for_each_special_segment<'a, F>(&self, text: &'a str, mut on_segment: F)
+    where
+        F: FnMut(Segment<'a>),
+    {
+        if let Some(specials) = &self.special_tokens {
+            let mut last = 0;
+            for m in specials.matcher.leftmost_find_iter(text.as_bytes()) {
+                let start = m.start();
+                let end = m.end();
+                if start > last {
+                    on_segment(Segment::Text(&text[last..start]));
+                }
+                on_segment(Segment::Special(m.value()));
+                last = end;
+            }
+            if last < text.len() {
+                on_segment(Segment::Text(&text[last..]));
+            }
+        } else {
+            on_segment(Segment::Text(text));
+        }
+    }
+
+    fn encode_text_segment(&self, text: &str, encoded: &mut Vec<u32>) {
+        match &self.pre {
+            Some(pre) => {
+                for piece in pre.split(text) {
+                    encoded.extend(self.bpe.encode_via_backtracking(piece.as_bytes()));
+                }
+            }
+            None => encoded.extend(self.bpe.encode(text)),
+        }
+    }
+
+    fn encode_text_segment_cached(&self, text: &str, encoded: &mut Vec<u32>) {
+        if let Some(pre) = &self.pre {
+            TEXT_CHUNK_CACHE.with(|cache| {
+                let mut chunks = cache.borrow_mut();
+                chunks.clear();
+
+                for piece in pre.split(text) {
+                    chunks.push(piece.as_bytes().to_vec());
+                }
+
+                for piece in chunks.iter() {
+                    if let Some(token) = self.bpe.token(piece) {
+                        encoded.push(token);
+                    } else {
+                        let mut tokens = self.bpe.encode_bytes(piece);
+                        encoded.append(&mut tokens);
+                    }
+                }
+            });
+        } else {
+            encoded.extend(self.bpe.encode(text));
+        }
+    }
+
+    fn count_till_limit_piece(
+        &self,
+        text: &str,
+        token_limit: usize,
+        consumed: usize,
+    ) -> Option<usize> {
+        self.split(text).try_fold(consumed, |count, piece| {
+            self.bpe
+                .count_till_limit(piece.as_bytes(), token_limit - count)
+                .map(|piece_count| count + piece_count)
+        })
     }
 }
 
@@ -500,7 +667,45 @@ pub fn o200k_base() -> &'static Tokenizer {
 }
 
 pub fn deepseek_base() -> &'static Tokenizer {
-    &DEEPSEEK_BASE
+    &BPE_DEEPSEEK_BASE
+}
+
+fn build_special_tokens(
+    special_tokens: impl IntoIterator<Item = (String, u32)>,
+) -> Result<Option<SpecialTokens>, SpecialTokenError> {
+    let mut id_to_token = HashMap::new();
+    let mut token_to_id = HashMap::new();
+    let mut patvals = Vec::new();
+
+    for (token, id) in special_tokens {
+        if token.is_empty() {
+            return Err(SpecialTokenError::EmptyToken);
+        }
+        if token_to_id.contains_key(&token) {
+            return Err(SpecialTokenError::DuplicateToken(token));
+        }
+        if id_to_token.contains_key(&id) {
+            return Err(SpecialTokenError::DuplicateId(id));
+        }
+        token_to_id.insert(token.clone(), id);
+        id_to_token.insert(id, token.clone());
+        patvals.push((token.into_bytes(), id));
+    }
+
+    if patvals.is_empty() {
+        return Ok(None);
+    }
+
+    let matcher = DoubleArrayAhoCorasickBuilder::new()
+        .match_kind(MatchKind::LeftmostLongest)
+        .build_with_values(patvals)
+        .map_err(SpecialTokenError::Automaton)?;
+
+    Ok(Some(SpecialTokens {
+        matcher,
+        id_to_token,
+        token_to_id,
+    }))
 }
 
 #[cfg(test)]
@@ -622,5 +827,29 @@ mod tests {
                 "should have used multiple threads"
             );
         }
+    }
+
+    #[test]
+    fn test_special_tokens_roundtrip() {
+        let special_token = "<|end|>";
+        let special_id = 1_000_000;
+        let tok = cl100k_base()
+            .clone()
+            .with_special_tokens([(special_token.to_string(), special_id)])
+            .expect("special tokens should be valid");
+
+        let text = format!("hello{special_token}world");
+        let mut expected = cl100k_base().encode("hello");
+        expected.push(special_id);
+        expected.extend(cl100k_base().encode("world"));
+
+        assert_eq!(tok.encode(&text), expected);
+        assert_eq!(tok.count(&text), expected.len());
+        assert_eq!(tok.decode(&expected).as_deref(), Some(text.as_str()));
+        assert_eq!(
+            tok.count_till_limit(&text, expected.len()),
+            Some(expected.len())
+        );
+        assert_eq!(tok.count_till_limit(&text, expected.len() - 1), None);
     }
 }

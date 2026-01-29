@@ -124,6 +124,7 @@ profile = "release"
 bindings = "pyo3"
 # Python extension module features
 features = ["pyo3/extension-module"]
+manifest-path = "crates/python-bpe/Cargo.toml"
 # Name of the module to be built
 module-name = "rs_bpe.bpe"
 # Location of Python source directory

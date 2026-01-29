@@ -179,10 +179,10 @@ pub fn find_hash_factor_for_dictionary(tokens: impl IntoIterator<Item = Vec<u8>>
     use std::collections::HashSet;
 
     let all_tokens = tokens.into_iter().collect_vec();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     loop {
-        let factor: u64 = rng.gen();
+        let factor: u64 = rng.random();
         let mut seen = HashSet::new();
 
         if all_tokens
@@ -728,14 +728,14 @@ pub fn create_test_string_with_predicate(
     min_bytes: usize,
     predicate: impl Fn(&str) -> bool,
 ) -> String {
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
 
     let mut result = String::new();
     let mut tokens = Vec::new();
 
     'keep: while result.len() < min_bytes {
         'next: for _ in 0..8 {
-            let i = thread_rng().gen_range(0..bpe.num_tokens()) as u32;
+            let i = rng().random_range(0..bpe.num_tokens()) as u32;
 
             if let Ok(token) = std::str::from_utf8(bpe.token_bytes(i)) {
                 result.push_str(token);
@@ -761,9 +761,9 @@ pub fn create_test_string_with_predicate(
 
 #[cfg(feature = "rand")]
 pub fn select_test_string(text: &str, min_bytes: usize) -> &str {
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
 
-    let mut start = thread_rng().gen_range(0..text.len() - min_bytes);
+    let mut start = rng().random_range(0..text.len() - min_bytes);
     while !text.is_char_boundary(start) {
         start -= 1;
     }
@@ -779,11 +779,11 @@ pub fn select_test_string(text: &str, min_bytes: usize) -> &str {
 /// Generate test bytes by concatenating random tokens.
 #[cfg(feature = "rand")]
 pub fn create_test_bytes(bpe: &BytePairEncoding, min_bytes: usize) -> Vec<u8> {
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
 
     let mut result = Vec::new();
     while result.len() < min_bytes {
-        let i = thread_rng().gen_range(0..bpe.num_tokens());
+        let i = rng().random_range(0..bpe.num_tokens());
         result.extend(bpe.token_bytes(i as u32));
     }
 
