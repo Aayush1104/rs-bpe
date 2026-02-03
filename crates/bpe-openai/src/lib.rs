@@ -79,11 +79,11 @@ static BPE_O200K_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
 static BPE_DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bpe_deepseek_base.dict"));
     let bpe = rmp_serde::from_slice(bytes).expect("valid bpe data");
-    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+";
+    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+";
     let pat2 = "\\s+\\s";
     let pat3 = "\\s+";
     let mut tokenizer =
-        Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)], true)
+        Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)], false)
             .expect("valid regex");
     let special_tokens: HashMap<String, u32> = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -856,6 +856,16 @@ mod tests {
         assert_eq!(cl100k_base().count_till_limit("abcabc", 3), Some(2));
         assert_eq!(cl100k_base().count_till_limit("abcabcabc", 3), Some(3));
         assert_eq!(cl100k_base().count_till_limit("abcabcabcabc", 3), None);
+    }
+
+    #[test]
+    fn test_bom_no_truncate() {
+        let text = "hello \u{feff} world";
+        for tok in [cl100k_base(), o200k_base(), deepseek_base()] {
+            let tokens = tok.encode(text, None);
+            let decoded = tok.decode(&tokens);
+            assert_eq!(decoded.as_deref(), Some(text));
+        }
     }
 
     #[test]
