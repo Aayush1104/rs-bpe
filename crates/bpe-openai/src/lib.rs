@@ -79,7 +79,7 @@ static BPE_O200K_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
 static BPE_DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bpe_deepseek_base.dict"));
     let bpe = rmp_serde::from_slice(bytes).expect("valid bpe data");
-    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+";
+    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\p{Any}";
     let pat2 = "\\s+\\s";
     let pat3 = "\\s+";
     let mut tokenizer =
@@ -275,11 +275,7 @@ impl Tokenizer {
         token_limit: usize,
     ) -> Option<usize> {
         if self.special_tokens.is_none() {
-            return self.split(text.as_str()).try_fold(0, |consumed, piece| {
-                self.bpe
-                    .count_till_limit(piece.as_bytes(), token_limit - consumed)
-                    .map(|piece_count| consumed + piece_count)
-            });
+            return self.count_till_limit_piece(text.as_str(), token_limit, 0);
         }
 
         let mut consumed = 0;
@@ -1002,5 +998,18 @@ mod tests {
         expected.extend(cl100k_base().encode(&format!("b{start_token}c"), None));
 
         assert_eq!(tok.encode(&text, Some(&allowed)), expected);
+    }
+
+    #[test]
+    fn test_split_on_zero_width_space() {
+        let text = " \u{200B}";
+        let tok = deepseek_base();
+        let pieces: Vec<&str> = tok.split(text).collect();
+        assert_eq!(pieces, vec![" ", "\u{200B}"]);
+        let encoded = tok.encode(text, None);
+        assert_eq!(encoded, vec![223, 35020]);
+        let decoded = tok.decode(&encoded);
+        assert!(decoded.is_some());
+        assert_eq!(decoded.as_deref(), Some(text));
     }
 }
