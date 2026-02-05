@@ -1,6 +1,6 @@
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -156,6 +156,49 @@ impl Tokenizer {
     ) -> Vec<Option<String>> {
         let rust_options = options.map(|opts| opts.inner);
         self.0.decode_batch_parallel(&batch_tokens, rust_options)
+    }
+
+    #[pyo3(signature = (input, allowed_special = None))]
+    fn split<'py>(
+        &self,
+        py: Python<'py>,
+        input: Cow<str>,
+        allowed_special: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let allowed_special =
+            allowed_special.map(|items| items.into_iter().collect::<HashSet<String>>());
+        let allowed_special_refs = allowed_special.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str())
+                .collect::<HashSet<&str>>()
+        });
+        let pieces = self
+            .0
+            .split_with_special(input.as_ref(), allowed_special_refs.as_ref());
+        PyList::new(py, pieces)
+    }
+
+    #[pyo3(signature = (input, chunk_size = 64, allowed_special = None))]
+    fn split_chunks<'py>(
+        &self,
+        py: Python<'py>,
+        input: Cow<str>,
+        chunk_size: usize,
+        allowed_special: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let allowed_special =
+            allowed_special.map(|items| items.into_iter().collect::<HashSet<String>>());
+        let allowed_special_refs = allowed_special.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str())
+                .collect::<HashSet<&str>>()
+        });
+        let chunks = self
+            .0
+            .split_chunks(input.as_ref(), chunk_size, allowed_special_refs.as_ref());
+        PyList::new(py, chunks)
     }
 
     #[getter]

@@ -680,6 +680,93 @@ impl Tokenizer {
         }
     }
 
+    pub fn split_with_special(
+        &self,
+        text: &str,
+        allowed_special: Option<&HashSet<&str>>,
+    ) -> Vec<String> {
+        let mut pieces: Vec<String> = Vec::new();
+        let special_tokens = self.special_tokens();
+
+        self.for_each_special_segment(text, allowed_special, |segment| match segment {
+            Segment::Text(segment) => {
+                pieces.extend(self.split(segment).map(|piece| piece.to_string()));
+            }
+            Segment::Special(id) => {
+                let token = special_tokens
+                    .and_then(|tokens| tokens.iter().find(|(_, value)| **value == id))
+                    .map(|(token, _)| token.as_str());
+                if let Some(token) = token {
+                    pieces.push(token.to_string());
+                } else {
+                    debug_assert!(false, "special token id should exist");
+                }
+            }
+        });
+
+        pieces
+    }
+
+    pub fn split_chunks(
+        &self,
+        text: &str,
+        chunk_size: usize,
+        allowed_special: Option<&HashSet<&str>>,
+    ) -> Vec<String> {
+        let mut chunks: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let special_tokens = self.special_tokens();
+
+        self.for_each_special_segment(text, allowed_special, |segment| {
+            let mut push_piece = |piece: &str| {
+                if current.is_empty() {
+                    if piece.len() > chunk_size {
+                        chunks.push(piece.to_string());
+                        return;
+                    }
+                    current.push_str(piece);
+                    return;
+                }
+
+                if current.len().saturating_add(piece.len()) <= chunk_size {
+                    current.push_str(piece);
+                    return;
+                }
+
+                chunks.push(std::mem::take(&mut current));
+                if piece.len() > chunk_size {
+                    chunks.push(piece.to_string());
+                } else {
+                    current.push_str(piece);
+                }
+            };
+
+            match segment {
+                Segment::Text(segment) => {
+                    for piece in self.split(segment) {
+                        push_piece(piece);
+                    }
+                }
+                Segment::Special(id) => {
+                    let token = special_tokens
+                        .and_then(|tokens| tokens.iter().find(|(_, value)| **value == id))
+                        .map(|(token, _)| token.as_str());
+                    if let Some(token) = token {
+                        push_piece(token);
+                    } else {
+                        debug_assert!(false, "special token id should exist");
+                    }
+                }
+            }
+        });
+
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+
+        chunks
+    }
+
     fn count_till_limit_piece(
         &self,
         text: &str,
