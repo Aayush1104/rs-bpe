@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/python-bpe", "crates/bpe", "crates/bpe-openai"]
+members = ["crates/python-bpe", "crates/bpe", "crates/bpe-openai", "crates/go-bpe"]
 resolver = "2"
 
 [workspace.package]

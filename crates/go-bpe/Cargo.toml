@@ -1,0 +1,11 @@
+[package]
+name = "go-bpe"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "rsbpe"
+crate-type = ["staticlib"]
+
+[dependencies]
+bpe-openai = { version = "0.1.0", path = "../bpe-openai" }

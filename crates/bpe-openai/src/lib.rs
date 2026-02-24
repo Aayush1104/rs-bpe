@@ -79,7 +79,7 @@ static BPE_O200K_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
 static BPE_DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bpe_deepseek_base.dict"));
     let bpe = rmp_serde::from_slice(bytes).expect("valid bpe data");
-    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\p{Any}";
+    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|[^\\s]";
     let pat2 = "\\s+\\s";
     let pat3 = "\\s+";
     let mut tokenizer =
@@ -1097,6 +1097,17 @@ mod tests {
         assert_eq!(encoded, vec![223, 35020]);
         let decoded = tok.decode(&encoded);
         assert!(decoded.is_some());
+        assert_eq!(decoded.as_deref(), Some(text));
+    }
+
+    #[test]
+    fn test_split_leading_spaces_before_word() {
+        let text = "    aucun";
+        let tok = deepseek_base();
+        let pieces: Vec<&str> = tok.split(text).collect();
+        assert_eq!(pieces, vec!["   ", " aucun"]);
+        let encoded = tok.encode(text, None);
+        let decoded = tok.decode(&encoded);
         assert_eq!(decoded.as_deref(), Some(text));
     }
 }
