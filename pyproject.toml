@@ -9,7 +9,7 @@ build-backend = "maturin"
 
 [project]
 name = "rs_bpe"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
@@ -39,78 +39,11 @@ readme = "README.md"
 license = {text = "MIT"}
 keywords = [
     "byte-pair-encoding",
-    "subword-tokenization",
-    "subword-units",
     "tokenization",
-    "tokenizer",
-    "vocabulary",
-    "vocab",
-    "text-encoding",
-    "text-processing",
-    "string-encoding",
-    "rust",
-    "rust-extension",
-    "cpython-extension",
-    "python-library",
-    "python-package",
-    "pypi",
-    "cross-platform",
-    "fast",
-    "performance",
-    "high-performance",
-    "efficient",
-    "optimized",
-    "speed",
-    "blazing-fast",
-    "rapid",
-    "accelerated",
     "nlp",
-    "natural-language-processing",
-    "machine-learning",
-    "deep-learning",
-    "artificial-intelligence",
-    "ai",
-    "llm",
-    "large-language-models",
-    "transformers",
-    "generative-ai",
-    "text-generation",
-    "embeddings",
-    "data-science",
-    "research",
-    "linguistics",
-    "openai",
-    "tiktoken",
-    "tiktoken-alternative",
-    "tiktoken-compatible",
-    "huggingface",
-    "huggingface-tokenizers",
-    "tokenizers-library",
-    "developers",
-    "scientists",
-    "researchers",
-    "data-scientists",
-    "machine-learning-engineers",
-    "nlp-engineers",
-    "production-ready",
-    "stable",
-    "library",
-    "package",
-    "tool",
-    "sentencepiece",
-    "wordpiece",
-    "unigram",
-    "bpe-dropout",
-    "backtracking",
+    "rust",
+    "python",
 ]
-
-# Optional setuptools_scm configuration for Git-based versioning
-# Uncomment to use Git tags for versioning instead of Cargo.toml
-# [tool.setuptools_scm]
-# write_to = "python/rs_bpe/_version.py"
-# version_scheme = "no-guess-dev"
-# local_scheme = "node-and-date"
-# fallback_version = "0.1.0"
 
 # URLs for the project
 [project.urls]
@@ -124,6 +57,7 @@ profile = "release"
 bindings = "pyo3"
 # Python extension module features
 features = ["pyo3/extension-module"]
+manifest-path = "crates/python-bpe/Cargo.toml"
 # Name of the module to be built
 module-name = "rs_bpe.bpe"
 # Location of Python source directory
@@ -161,12 +95,11 @@ typeCheckingMode = "basic"
 reportMissingImports = true
 reportMissingTypeStubs = false
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "maturin>=1.8.3",
     "tomli>=2.2.1",
     "mypy>=1.15.0",
-    "ruff>=0.11.0",
 ]
 
 benchmark = [

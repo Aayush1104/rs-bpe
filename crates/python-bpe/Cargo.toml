@@ -1,0 +1,23 @@
+[package]
+name = "python-bpe"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Rediculously fast Python bindings for the RS-BPE (Byte Pair Encoding) implementation writtenin Rust"
+repository.workspace = true
+license.workspace = true
+keywords = ["bpe", "tokenizer", "nlp", "openai", "embeddings"]
+categories = ["text-processing", "api-bindings"]
+readme = "../../README.md"
+
+[lib]
+name = "bpe"
+crate-type = ["cdylib"]
+
+[dependencies]
+bpe = { version = "0.1.0", path = "../bpe" }
+bpe-openai = { version = "0.1.0", path = "../bpe-openai" }
+pyo3 = { workspace = true }
+once_cell = { workspace = true }
+rayon = { workspace = true }
+num_cpus = { workspace = true }

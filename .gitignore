@@ -23,7 +23,6 @@ typings/
 release/
 .mcp/*
 .mcp
-*.pyi
 .cursor/*
 .cursor
 .venv
