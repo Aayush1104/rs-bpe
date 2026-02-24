@@ -1,0 +1,119 @@
+name: Go FFI Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Version tag to release (e.g., v0.1.0-go1)'
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*-go*'
+
+jobs:
+  build:
+    name: Build librsbpe (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use_cross: false
+          - platform: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use_cross: true
+          - platform: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            use_cross: false
+          - platform: darwin-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            use_cross: false
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version_tag || '' }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (linux-arm64 only)
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build static library
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release -p go-bpe --target ${{ matrix.target }}
+          else
+            cargo build --release -p go-bpe --target ${{ matrix.target }}
+          fi
+
+      - name: Package artifact
+        run: |
+          tar -czf librsbpe.${{ matrix.platform }}.tar.gz \
+            -C target/${{ matrix.target }}/release librsbpe.a
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: librsbpe-${{ matrix.platform }}
+          path: librsbpe.${{ matrix.platform }}.tar.gz
+
+  release:
+    name: Create GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version_tag || '' }}
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag_name=${{ github.event.inputs.version_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: librsbpe-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "librsbpe ${{ steps.tag.outputs.tag_name }}"
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          files: artifacts/librsbpe.*.tar.gz
+          fail_on_unmatched_files: true
+          body: |
+            Pre-built `librsbpe.a` static libraries for Go FFI integration.
+
+            ## Platform assets
+            - `librsbpe.linux-amd64.tar.gz` — Linux x86_64
+            - `librsbpe.linux-arm64.tar.gz` — Linux AArch64
+            - `librsbpe.darwin-arm64.tar.gz` — macOS Apple Silicon
+            - `librsbpe.darwin-x86_64.tar.gz` — macOS Intel
