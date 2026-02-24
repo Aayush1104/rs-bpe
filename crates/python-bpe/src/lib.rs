@@ -27,6 +27,7 @@ struct ParallelOptions {
 #[pymethods]
 impl ParallelOptions {
     #[new]
+    #[pyo3(signature = (min_batch_size = None, chunk_size = None, max_threads = None))]
     fn new(
         min_batch_size: Option<usize>,
         chunk_size: Option<usize>,
