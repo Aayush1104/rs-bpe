@@ -44,12 +44,12 @@ impl<'a> AppendableEncoder<'a> {
             self.states.len() + 1,
             c,
         );
-        
+
         for m in iter {
             let new_token = m.value();
             let new_range = m.start()..m.end();
             assert_eq!(new_range.end, self.states.len() + 1);
-            
+
             if new_range.start == 0 {
                 self.states.push(State {
                     state,
@@ -58,15 +58,13 @@ impl<'a> AppendableEncoder<'a> {
                 });
                 break;
             } else {
-                let prev_token = unsafe { 
-                    self.states.get_unchecked(new_range.start - 1).last_token 
-                };
-                
+                let prev_token =
+                    unsafe { self.states.get_unchecked(new_range.start - 1).last_token };
+
                 if self.bpe.is_valid_token_pair(prev_token, new_token) {
-                    let prev_count = unsafe { 
-                        self.states.get_unchecked(new_range.start - 1).count 
-                    };
-                    
+                    let prev_count =
+                        unsafe { self.states.get_unchecked(new_range.start - 1).count };
+
                     self.states.push(State {
                         state,
                         last_token: new_token,

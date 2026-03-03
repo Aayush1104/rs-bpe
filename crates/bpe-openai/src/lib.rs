@@ -148,6 +148,11 @@ enum Segment<'a> {
     Special(u32),
 }
 
+enum ChunkPiece<'a> {
+    Text(&'a str),
+    Special(u32),
+}
+
 /// Processing options for parallel encoding
 #[derive(Debug, Clone, Copy)]
 pub struct ParallelOptions {
@@ -415,6 +420,163 @@ impl Tokenizer {
         }
     }
 
+    /// Splits a single text into chunks and encodes those chunks in parallel.
+    ///
+    /// This is useful for long-text workloads where calling `split_chunks` and
+    /// `encode_batch_parallel` from Python would otherwise introduce extra crossing overhead.
+    pub fn encode_split_chunks_parallel(
+        &self,
+        text: &str,
+        chunk_size: usize,
+        options: Option<ParallelOptions>,
+        allowed_special: Option<&HashSet<&str>>,
+    ) -> Vec<Vec<u32>> {
+        fn flush_chunk<'a>(
+            chunks: &mut Vec<Vec<ChunkPiece<'a>>>,
+            current: &mut Vec<ChunkPiece<'a>>,
+            current_len: &mut usize,
+        ) {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(current));
+                *current_len = 0;
+            }
+        }
+
+        fn push_piece<'a>(
+            chunks: &mut Vec<Vec<ChunkPiece<'a>>>,
+            current: &mut Vec<ChunkPiece<'a>>,
+            current_len: &mut usize,
+            chunk_size: usize,
+            piece: ChunkPiece<'a>,
+            piece_len: usize,
+        ) {
+            if piece_len == 0 {
+                return;
+            }
+
+            if current.is_empty() {
+                if piece_len > chunk_size {
+                    chunks.push(vec![piece]);
+                } else {
+                    current.push(piece);
+                    *current_len = piece_len;
+                }
+                return;
+            }
+
+            if current_len.saturating_add(piece_len) <= chunk_size {
+                current.push(piece);
+                *current_len += piece_len;
+                return;
+            }
+
+            flush_chunk(chunks, current, current_len);
+            if piece_len > chunk_size {
+                chunks.push(vec![piece]);
+            } else {
+                current.push(piece);
+                *current_len = piece_len;
+            }
+        }
+
+        let options = options.unwrap_or_default();
+        let special_id_to_token = self
+            .special_tokens
+            .as_ref()
+            .map(|specials| &specials.id_to_token);
+        let mut chunks: Vec<Vec<ChunkPiece<'_>>> = Vec::new();
+        let mut current_chunk: Vec<ChunkPiece<'_>> = Vec::new();
+        let mut current_len = 0usize;
+
+        self.for_each_special_segment(text, allowed_special, |segment| match segment {
+            Segment::Text(segment) => {
+                for piece in self.split(segment) {
+                    push_piece(
+                        &mut chunks,
+                        &mut current_chunk,
+                        &mut current_len,
+                        chunk_size,
+                        ChunkPiece::Text(piece),
+                        piece.len(),
+                    );
+                }
+            }
+            Segment::Special(id) => {
+                let token_len = special_id_to_token
+                    .and_then(|tokens| tokens.get(&id))
+                    .map(String::len);
+                if let Some(token_len) = token_len {
+                    push_piece(
+                        &mut chunks,
+                        &mut current_chunk,
+                        &mut current_len,
+                        chunk_size,
+                        ChunkPiece::Special(id),
+                        token_len,
+                    );
+                } else {
+                    debug_assert!(false, "special token id should exist");
+                }
+            }
+        });
+
+        flush_chunk(&mut chunks, &mut current_chunk, &mut current_len);
+
+        let encode_chunk = |chunk: &[ChunkPiece<'_>]| {
+            let mut encoded = Vec::new();
+            for piece in chunk {
+                match piece {
+                    ChunkPiece::Text(text_piece) => {
+                        self.encode_piece_cached(text_piece, &mut encoded);
+                    }
+                    ChunkPiece::Special(token) => encoded.push(*token),
+                }
+            }
+            encoded
+        };
+
+        if chunks.len() < options.min_batch_size {
+            return chunks
+                .into_iter()
+                .map(|chunk| encode_chunk(&chunk))
+                .collect();
+        }
+
+        let default_threads = if options.use_thread_pool {
+            TOKENIZER_POOL.current_num_threads()
+        } else {
+            rayon::current_num_threads()
+        };
+        let threads_used = if options.max_threads > 0 {
+            std::cmp::min(options.max_threads, default_threads)
+        } else {
+            default_threads
+        };
+        let work_chunk_size = options.chunk_size.max(1);
+
+        let encode_batch = || {
+            chunks
+                .par_iter()
+                .with_min_len(work_chunk_size)
+                .map(|chunk| encode_chunk(chunk))
+                .collect()
+        };
+
+        if options.max_threads > 0 && threads_used < default_threads {
+            ThreadPoolBuilder::new()
+                .num_threads(threads_used)
+                .thread_name(|i| format!("tokenizer-custom-{}", i))
+                .stack_size(2 * 1024 * 1024)
+                .build()
+                .expect("Failed to build custom tokenizer thread pool")
+                .install(encode_batch)
+        } else if options.use_thread_pool {
+            TOKENIZER_POOL.install(encode_batch)
+        } else {
+            encode_batch()
+        }
+    }
+
     /// Optimized encoding with thread-local caching for parallel workloads
     fn encode_cached(&self, text: &str, allowed_special: Option<&HashSet<&str>>) -> Vec<u32> {
         let text = self.normalize(text);
@@ -625,16 +787,19 @@ impl Tokenizer {
     fn encode_text_segment_cached(&self, text: &str, encoded: &mut Vec<u32>) {
         if let Some(pre) = &self.pre {
             for piece in pre.split(text) {
-                let bytes = piece.as_bytes();
-                if let Some(token) = self.bpe.token(bytes) {
-                    encoded.push(token);
-                } else {
-                    let mut tokens = self.bpe.encode_bytes(bytes);
-                    encoded.append(&mut tokens);
-                }
+                self.encode_piece_cached(piece, encoded);
             }
         } else {
             encoded.extend(self.bpe.encode(text));
+        }
+    }
+
+    fn encode_piece_cached(&self, piece: &str, encoded: &mut Vec<u32>) {
+        let bytes = piece.as_bytes();
+        if let Some(token) = self.bpe.token(bytes) {
+            encoded.push(token);
+        } else {
+            encoded.extend(self.bpe.encode_bytes(bytes));
         }
     }
 
@@ -665,44 +830,69 @@ impl Tokenizer {
         pieces
     }
 
-    pub fn split_chunks(
-        &self,
-        text: &str,
+    pub fn split_chunks<'a>(
+        &'a self,
+        text: &'a str,
         chunk_size: usize,
         allowed_special: Option<&HashSet<&str>>,
-    ) -> Vec<String> {
-        let mut chunks: Vec<String> = Vec::new();
-        let mut current = String::new();
+    ) -> Vec<&'a str> {
+        fn flush_current<'a>(
+            chunks: &mut Vec<&'a str>,
+            text: &'a str,
+            current_start: &mut Option<usize>,
+            current_len: &mut usize,
+        ) {
+            if let Some(start) = current_start.take() {
+                let end = start + *current_len;
+                chunks.push(&text[start..end]);
+                *current_len = 0;
+            }
+        }
+
+        let mut chunks: Vec<&'a str> = Vec::new();
+        let mut current_start: Option<usize> = None;
+        let mut current_len = 0usize;
+        let mut cursor = 0usize;
         let special_tokens = self.special_tokens();
 
         self.for_each_special_segment(text, allowed_special, |segment| {
-            let mut push_piece = |piece: &str| {
-                if current.is_empty() {
-                    if piece.len() > chunk_size {
-                        chunks.push(piece.to_string());
+            let mut push_range = |piece_len: usize| {
+                if piece_len == 0 {
+                    return;
+                }
+
+                let start = cursor;
+                let end = start + piece_len;
+                cursor = end;
+
+                if current_start.is_none() {
+                    if piece_len > chunk_size {
+                        chunks.push(&text[start..end]);
                         return;
                     }
-                    current.push_str(piece);
+                    current_start = Some(start);
+                    current_len = piece_len;
                     return;
                 }
 
-                if current.len().saturating_add(piece.len()) <= chunk_size {
-                    current.push_str(piece);
+                if current_len.saturating_add(piece_len) <= chunk_size {
+                    current_len += piece_len;
                     return;
                 }
 
-                chunks.push(std::mem::take(&mut current));
-                if piece.len() > chunk_size {
-                    chunks.push(piece.to_string());
+                flush_current(&mut chunks, text, &mut current_start, &mut current_len);
+                if piece_len > chunk_size {
+                    chunks.push(&text[start..end]);
                 } else {
-                    current.push_str(piece);
+                    current_start = Some(start);
+                    current_len = piece_len;
                 }
             };
 
             match segment {
                 Segment::Text(segment) => {
                     for piece in self.split(segment) {
-                        push_piece(piece);
+                        push_range(piece.len());
                     }
                 }
                 Segment::Special(id) => {
@@ -710,7 +900,7 @@ impl Tokenizer {
                         .and_then(|tokens| tokens.iter().find(|(_, value)| **value == id))
                         .map(|(token, _)| token.as_str());
                     if let Some(token) = token {
-                        push_piece(token);
+                        push_range(token.len());
                     } else {
                         debug_assert!(false, "special token id should exist");
                     }
@@ -718,9 +908,7 @@ impl Tokenizer {
             }
         });
 
-        if !current.is_empty() {
-            chunks.push(current);
-        }
+        flush_current(&mut chunks, text, &mut current_start, &mut current_len);
 
         chunks
     }
@@ -993,6 +1181,29 @@ mod tests {
                 "should have used multiple threads"
             );
         }
+    }
+
+    #[test]
+    fn test_encode_split_chunks_parallel() {
+        let tok = cl100k_base();
+        let text = "This is a longer input text for split and parallel encoding. ".repeat(128);
+        let chunk_size = 96;
+
+        let combined = tok.encode_split_chunks_parallel(&text, chunk_size, None, None);
+        let chunks = tok.split_chunks(&text, chunk_size, None);
+        let manual = tok.encode_batch_parallel(&chunks, None, None);
+
+        assert_eq!(
+            combined, manual,
+            "combined and manual pipeline should match"
+        );
+
+        let flattened: Vec<u32> = combined.into_iter().flatten().collect();
+        let direct = tok.encode(&text, None);
+        assert_eq!(
+            flattened, direct,
+            "flattened chunk tokens should match direct encode"
+        );
     }
 
     #[test]

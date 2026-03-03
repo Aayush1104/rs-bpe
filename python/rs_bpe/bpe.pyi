@@ -33,6 +33,13 @@ class Tokenizer:
         options: ParallelOptions | None = ...,
         allowed_special: set[str] | None = ...,
     ) -> tuple[list[list[int]], int, float, int]: ...
+    def encode_split_chunks_parallel(
+        self,
+        input: str,
+        chunk_size: int = ...,
+        options: ParallelOptions | None = ...,
+        allowed_special: set[str] | None = ...,
+    ) -> tuple[list[list[int]], int, float, int]: ...
     def decode(self, tokens: list[int]) -> str | None: ...
     def decode_batch(self, batch_tokens: list[list[int]]) -> list[str | None]: ...
     def decode_batch_parallel(

@@ -48,12 +48,12 @@ impl<'a> PrependableEncoder<'a> {
             self.states.len() + 1,
             c,
         );
-        
+
         for m in iter {
             let new_token = m.value();
             let new_range = m.start()..m.end();
             assert_eq!(new_range.end, self.states.len() + 1);
-            
+
             if new_range.start == 0 {
                 self.states.push(State {
                     state,
@@ -62,15 +62,13 @@ impl<'a> PrependableEncoder<'a> {
                 });
                 break;
             } else {
-                let next_token = unsafe { 
-                    self.states.get_unchecked(new_range.start - 1).prev_token 
-                };
-                
+                let next_token =
+                    unsafe { self.states.get_unchecked(new_range.start - 1).prev_token };
+
                 if self.bpe.is_valid_token_pair(new_token, next_token) {
-                    let prev_count = unsafe { 
-                        self.states.get_unchecked(new_range.start - 1).count 
-                    };
-                    
+                    let prev_count =
+                        unsafe { self.states.get_unchecked(new_range.start - 1).count };
+
                     self.states.push(State {
                         state,
                         prev_token: new_token,

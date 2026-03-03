@@ -152,6 +152,38 @@ impl Tokenizer {
         Ok((tokens, total_tokens, time_taken, threads_used))
     }
 
+    #[pyo3(signature = (input, chunk_size = 64, options = None, allowed_special = None))]
+    fn encode_split_chunks_parallel(
+        &self,
+        input: Cow<str>,
+        chunk_size: usize,
+        options: Option<ParallelOptions>,
+        allowed_special: Option<Vec<String>>,
+    ) -> PyResult<(Vec<Vec<u32>>, usize, f64, usize)> {
+        let rust_options = options.map(|opts| opts.inner);
+        let allowed_special =
+            allowed_special.map(|items| items.into_iter().collect::<HashSet<String>>());
+        let allowed_special_refs = allowed_special.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str())
+                .collect::<HashSet<&str>>()
+        });
+        let tokens = self.0.encode_split_chunks_parallel(
+            input.as_ref(),
+            chunk_size,
+            rust_options,
+            allowed_special_refs.as_ref(),
+        );
+        let total_tokens = tokens.iter().map(|t| t.len()).sum();
+
+        // Backward compatibility values
+        let time_taken = 0.0;
+        let threads_used = num_cpus::get();
+
+        Ok((tokens, total_tokens, time_taken, threads_used))
+    }
+
     fn decode(&self, tokens: Vec<u32>) -> Option<String> {
         self.0.decode(&tokens)
     }

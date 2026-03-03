@@ -37,11 +37,11 @@ impl<'a> BacktrackEncoder<'a> {
     pub(crate) fn step(&mut self) -> Option<u32> {
         let mut token = self.next_token?;
         let last = self.tokens.last().copied();
-        
+
         loop {
             let token_len = self.bpe.token_len(token);
             let end_pos = self.pos + token_len;
-            
+
             if self.bitfield.is_set(end_pos)
                 && last
                     .map(|last_token| self.bpe.is_valid_token_pair(last_token, token))
@@ -65,7 +65,7 @@ impl<'a> BacktrackEncoder<'a> {
                 break;
             }
         }
-        
+
         self.next_token
     }
 

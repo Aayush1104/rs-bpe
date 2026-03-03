@@ -28,26 +28,26 @@ impl<'a> IntervalEncoding<'a> {
     pub fn new(bpe: &'a BytePairEncoding, text: &'a [u8]) -> Self {
         let last_token = bpe.encode_all_prefixes(text);
         let mut tree_size = vec![1; text.len() + 1];
-        
+
         for (id, token) in last_token.iter().copied().enumerate().rev() {
             let id = id + 1;
             tree_size[id - bpe.token_len(token)] += tree_size[id];
         }
-        
+
         let mut tree_end = vec![1];
         let mut tree_id = vec![0];
         let mut tree_depth = vec![0];
-        
+
         for (id, token) in last_token.iter().copied().enumerate() {
             let id = id + 1;
             let parent = id - bpe.token_len(token);
-            
+
             tree_id.push(tree_end[parent]);
             tree_end.push(tree_end[parent] + 1);
             tree_depth.push(tree_depth[parent] + 1);
             tree_end[parent] += tree_size[id];
         }
-        
+
         Self {
             bpe,
             text,

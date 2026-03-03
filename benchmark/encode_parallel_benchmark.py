@@ -4,6 +4,7 @@ Benchmark script for rs_bpe parallel encoding behavior.
 This script compares:
 1) Sequential batch encode vs parallel batch encode.
 2) Direct long-text encode vs split_chunks + parallel encode.
+3) Direct long-text encode vs encode_split_chunks_parallel.
 """
 
 from __future__ import annotations
@@ -309,11 +310,18 @@ def main() -> None:
 
     direct_tokens = tokenizer.encode(long_text)
     pre_split_chunks = tokenizer.split_chunks(long_text, args.split_chunk_size)
-    split_batch_tokens, _, _, _ = tokenizer.encode_batch_parallel(
+    split_batch_tokens, split_total_tokens, _, _ = tokenizer.encode_batch_parallel(
         pre_split_chunks, parallel_options
     )
     merged_split_tokens = flatten_token_batches(split_batch_tokens)
-    long_result_equal = direct_tokens == merged_split_tokens
+    split_pipeline_result_equal = direct_tokens == merged_split_tokens
+    split_api_batch_tokens, split_api_total_tokens, _, _ = (
+        tokenizer.encode_split_chunks_parallel(
+            long_text, args.split_chunk_size, parallel_options
+        )
+    )
+    merged_split_api_tokens = flatten_token_batches(split_api_batch_tokens)
+    split_api_result_equal = direct_tokens == merged_split_api_tokens
 
     if len(pre_split_chunks) < args.parallel_min_batch_size:
         print(
@@ -337,6 +345,12 @@ def main() -> None:
         )
         return total_tokens
 
+    def run_encode_split_chunks_parallel() -> int:
+        _, total_tokens, _, _ = tokenizer.encode_split_chunks_parallel(
+            long_text, args.split_chunk_size, parallel_options
+        )
+        return total_tokens
+
     direct_stats, direct_last = run_timed(
         run_direct_long_encode, runs=args.runs, warmups=args.warmups
     )
@@ -345,6 +359,9 @@ def main() -> None:
     )
     split_encode_only_stats, split_encode_only_last = run_timed(
         run_parallel_on_pre_split_chunks, runs=args.runs, warmups=args.warmups
+    )
+    split_api_stats, split_api_last = run_timed(
+        run_encode_split_chunks_parallel, runs=args.runs, warmups=args.warmups
     )
 
     speedup_split_total = (
@@ -357,28 +374,48 @@ def main() -> None:
         if split_encode_only_stats.mean > 0
         else float("inf")
     )
+    speedup_split_api = (
+        direct_stats.mean / split_api_stats.mean
+        if split_api_stats.mean > 0
+        else float("inf")
+    )
 
-    print("=== 2) Long Text: Direct Encode vs split_chunks + Parallel Encode ===")
+    print(
+        "=== 2) Long Text: Direct vs split_chunks+parallel vs "
+        "encode_split_chunks_parallel ==="
+    )
     print(
         f"long_text_chars={len(long_text)}, pre_split_chunks={len(pre_split_chunks)}, "
         f"split_chunk_size={args.split_chunk_size}"
     )
     print(
         "token_count_check="
-        f"(direct={len(direct_tokens)}, split_pipeline={len(merged_split_tokens)})"
+        f"(direct={len(direct_tokens)}, split_pipeline={len(merged_split_tokens)}, "
+        f"split_api={len(merged_split_api_tokens)})"
     )
-    print(f"long_result_equal={long_result_equal}")
+    print(
+        f"long_result_equal=(split_pipeline={split_pipeline_result_equal}, "
+        f"split_api={split_api_result_equal})"
+    )
     print_stats("direct_encode             ", direct_stats)
     print_stats("split_chunks+parallel     ", split_total_stats)
     print_stats("parallel_on_pre_split_only", split_encode_only_stats)
+    print_stats("encode_split_chunks_parallel", split_api_stats)
     print(f"speedup(split+parallel total over direct): {speedup_split_total:.3f}x")
     print(
         "speedup(pre-split parallel only over direct): "
         f"{speedup_split_encode_only:.3f}x"
     )
     print(
+        f"speedup(encode_split_chunks_parallel over direct): {speedup_split_api:.3f}x"
+    )
+    print(
         f"result_tokens=(direct={direct_last}, split_total={split_total_last}, "
-        f"pre_split_parallel={split_encode_only_last})"
+        f"pre_split_parallel={split_encode_only_last}, split_api={split_api_last})"
+    )
+    print(
+        "token_count_consistency="
+        f"(split_total={split_total_tokens}, split_api={split_api_total_tokens})"
     )
 
 
