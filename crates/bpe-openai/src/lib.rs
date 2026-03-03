@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -29,11 +28,6 @@ static TOKENIZER_POOL: Lazy<rayon::ThreadPool> = Lazy::new(|| {
         .build()
         .expect("Failed to build tokenizer thread pool")
 });
-
-// Thread-local cache for pre-split regex matches
-thread_local! {
-    static TEXT_CHUNK_CACHE: RefCell<Vec<Vec<u8>>> = RefCell::new(Vec::with_capacity(1024));
-}
 
 // Returns optimal thread count for tokenization workloads
 fn get_optimal_thread_count() -> usize {
@@ -380,73 +374,45 @@ impl Tokenizer {
     ) -> Vec<Vec<u32>> {
         let options = options.unwrap_or_default();
 
-        // Debug print for start time and batch size
-        // println!("Rust DEBUG: Starting parallel encode for {} texts", texts.len());
-        let start_time = std::time::Instant::now();
-
         // If batch is too small, use regular sequential processing
         if texts.len() < options.min_batch_size {
-            // println!("Rust DEBUG: Batch too small, using sequential processing");
             let sequential_result = self.encode_batch(texts, allowed_special);
-            let elapsed = start_time.elapsed();
-            // println!("Rust DEBUG: Sequential completed in {:?}", elapsed);
             return sequential_result.tokens;
         }
 
-        // Determine thread count based on options
-        let available_threads = rayon::current_num_threads();
-        let threads_used = if options.max_threads > 0 {
-            std::cmp::min(options.max_threads, available_threads)
+        let default_threads = if options.use_thread_pool {
+            TOKENIZER_POOL.current_num_threads()
         } else {
-            available_threads
+            rayon::current_num_threads()
+        };
+        let threads_used = if options.max_threads > 0 {
+            std::cmp::min(options.max_threads, default_threads)
+        } else {
+            default_threads
+        };
+        let chunk_size = options.chunk_size.max(1);
+
+        let encode_batch = || {
+            texts
+                .par_iter()
+                .with_min_len(chunk_size)
+                .map(|&text| self.encode_cached(text, allowed_special))
+                .collect()
         };
 
-        // println!("Rust DEBUG: Using {} threads of {} available", threads_used, available_threads);
-
-        // Create immutable reference for thread safety
-        let tokenizer = Arc::new(self.clone());
-
-        // Pre-allocate result vector to avoid resizing
-        let mut tokens = Vec::with_capacity(texts.len());
-
-        if options.use_thread_pool {
-            // Use our optimized thread pool
-            // println!("Rust DEBUG: Using optimized thread pool");
-            let pool_start = std::time::Instant::now();
-
-            TOKENIZER_POOL.install(|| {
-                // Process all inputs in parallel and collect results
-                tokens = texts
-                    .par_iter()
-                    .map(|&text| {
-                        let tokenizer = &tokenizer;
-                        tokenizer.encode_cached(text, allowed_special)
-                    })
-                    .collect();
-            });
-
-            // println!("Rust DEBUG: Thread pool processing took {:?}", pool_start.elapsed());
+        if options.max_threads > 0 && threads_used < default_threads {
+            ThreadPoolBuilder::new()
+                .num_threads(threads_used)
+                .thread_name(|i| format!("tokenizer-custom-{}", i))
+                .stack_size(2 * 1024 * 1024)
+                .build()
+                .expect("Failed to build custom tokenizer thread pool")
+                .install(encode_batch)
+        } else if options.use_thread_pool {
+            TOKENIZER_POOL.install(encode_batch)
         } else {
-            // Use default Rayon parallelism
-            // println!("Rust DEBUG: Using default Rayon parallelism");
-            let rayon_start = std::time::Instant::now();
-
-            tokens = texts
-                .par_iter()
-                .map(|&text| {
-                    let tokenizer = &tokenizer;
-                    tokenizer.encode(text, allowed_special)
-                })
-                .collect();
-
-            // println!("Rust DEBUG: Rayon processing took {:?}", rayon_start.elapsed());
+            encode_batch()
         }
-
-        let total_tokens: usize = tokens.iter().map(|t| t.len()).sum();
-        let elapsed = start_time.elapsed();
-        // println!("Rust DEBUG: Total parallel encode completed in {:?}, produced {} tokens", elapsed, total_tokens);
-
-        tokens
     }
 
     /// Optimized encoding with thread-local caching for parallel workloads
@@ -658,23 +624,15 @@ impl Tokenizer {
 
     fn encode_text_segment_cached(&self, text: &str, encoded: &mut Vec<u32>) {
         if let Some(pre) = &self.pre {
-            TEXT_CHUNK_CACHE.with(|cache| {
-                let mut chunks = cache.borrow_mut();
-                chunks.clear();
-
-                for piece in pre.split(text) {
-                    chunks.push(piece.as_bytes().to_vec());
+            for piece in pre.split(text) {
+                let bytes = piece.as_bytes();
+                if let Some(token) = self.bpe.token(bytes) {
+                    encoded.push(token);
+                } else {
+                    let mut tokens = self.bpe.encode_bytes(bytes);
+                    encoded.append(&mut tokens);
                 }
-
-                for piece in chunks.iter() {
-                    if let Some(token) = self.bpe.token(piece) {
-                        encoded.push(token);
-                    } else {
-                        let mut tokens = self.bpe.encode_bytes(piece);
-                        encoded.append(&mut tokens);
-                    }
-                }
-            });
+            }
         } else {
             encoded.extend(self.bpe.encode(text));
         }

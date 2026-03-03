@@ -263,15 +263,18 @@ parallel_options = openai.ParallelOptions(
 
 # Encode batch with performance metrics
 start_time = time.time()
-result = tokenizer.encode_batch(texts, parallel_options)
-end_time = time.time()
+tokens_batch, total_tokens, _, threads_used = tokenizer.encode_batch_parallel(
+    texts, parallel_options
+)
+time_taken = time.time() - start_time
 
-print(f"Processed {len(texts)} texts in {result.time_taken:.6f}s")
-print(f"Total tokens: {result.total_tokens}")
-print(f"Throughput: {result.total_tokens / result.time_taken:.1f} tokens/second")
+print(f"Processed {len(texts)} texts in {time_taken:.6f}s")
+print(f"Total tokens: {total_tokens}")
+print(f"Threads used: {threads_used}")
+print(f"Throughput: {total_tokens / time_taken:.1f} tokens/second")
 
 # Access individual token lists
-for i, tokens in enumerate(result.tokens):
+for i, tokens in enumerate(tokens_batch):
     print(f"Text {i} has {len(tokens)} tokens")
 ```
 
@@ -395,11 +398,11 @@ tokenizer = openai.cl100k_base()
 
 # For interactive, latency-sensitive operations
 small_batch = ["Quick response needed"] * 5
-result_small = tokenizer.encode_batch(small_batch, low_latency_options)
+result_small = tokenizer.encode_batch_parallel(small_batch, low_latency_options)
 
 # For background processing jobs
 large_batch = ["Process in background"] * 1000
-result_large = tokenizer.encode_batch(large_batch, high_throughput_options)
+result_large = tokenizer.encode_batch_parallel(large_batch, high_throughput_options)
 ```
 
 ### Building from Source

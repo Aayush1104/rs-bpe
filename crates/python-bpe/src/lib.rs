@@ -27,11 +27,12 @@ struct ParallelOptions {
 #[pymethods]
 impl ParallelOptions {
     #[new]
-    #[pyo3(signature = (min_batch_size = None, chunk_size = None, max_threads = None))]
+    #[pyo3(signature = (min_batch_size = None, chunk_size = None, max_threads = None, use_thread_pool = None))]
     fn new(
         min_batch_size: Option<usize>,
         chunk_size: Option<usize>,
         max_threads: Option<usize>,
+        use_thread_pool: Option<bool>,
     ) -> Self {
         let mut options = ::bpe_openai::ParallelOptions::default();
 
@@ -45,6 +46,10 @@ impl ParallelOptions {
 
         if let Some(max_threads) = max_threads {
             options.max_threads = max_threads;
+        }
+
+        if let Some(use_thread_pool) = use_thread_pool {
+            options.use_thread_pool = use_thread_pool;
         }
 
         Self { inner: options }
@@ -63,6 +68,11 @@ impl ParallelOptions {
     #[getter]
     fn max_threads(&self) -> usize {
         self.inner.max_threads
+    }
+
+    #[getter]
+    fn use_thread_pool(&self) -> bool {
+        self.inner.use_thread_pool
     }
 }
 
