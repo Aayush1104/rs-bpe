@@ -13,9 +13,12 @@ static O200K_TOKENIZER: Lazy<Mutex<Option<&'static ::bpe_openai::Tokenizer>>> =
     Lazy::new(|| Mutex::new(None));
 static DEEPSEEK_TOKENIZER: Lazy<Mutex<Option<&'static ::bpe_openai::Tokenizer>>> =
     Lazy::new(|| Mutex::new(None));
+static DEEPSEEK_32_TOKENIZER: Lazy<Mutex<Option<&'static ::bpe_openai::Tokenizer>>> =
+    Lazy::new(|| Mutex::new(None));
 static CL100K_INIT: Once = Once::new();
 static O200K_INIT: Once = Once::new();
 static DEEPSEEK_INIT: Once = Once::new();
+static DEEPSEEK_32_INIT: Once = Once::new();
 
 /// Python wrapper for ParallelOptions
 #[pyclass]
@@ -272,9 +275,11 @@ fn bpe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cl100k_base, m)?)?;
     m.add_function(wrap_pyfunction!(o200k_base, m)?)?;
     m.add_function(wrap_pyfunction!(deepseek_base, m)?)?;
+    m.add_function(wrap_pyfunction!(deepseek_32, m)?)?;
     m.add_function(wrap_pyfunction!(is_cached_cl100k, m)?)?;
     m.add_function(wrap_pyfunction!(is_cached_o200k, m)?)?;
     m.add_function(wrap_pyfunction!(is_cached_deepseek, m)?)?;
+    m.add_function(wrap_pyfunction!(is_cached_deepseek_32, m)?)?;
     m.add_function(wrap_pyfunction!(get_num_threads, m)?)?;
     Ok(())
 }
@@ -313,6 +318,17 @@ fn deepseek_base() -> PyResult<Tokenizer> {
 }
 
 #[pyfunction]
+fn deepseek_32() -> PyResult<Tokenizer> {
+    DEEPSEEK_32_INIT.call_once(|| {
+        let mut tokenizer = DEEPSEEK_32_TOKENIZER.lock().unwrap();
+        *tokenizer = Some(::bpe_openai::deepseek_32());
+    });
+
+    let tokenizer_opt = DEEPSEEK_32_TOKENIZER.lock().unwrap();
+    Ok(Tokenizer(tokenizer_opt.as_ref().unwrap()))
+}
+
+#[pyfunction]
 fn is_cached_cl100k() -> PyResult<bool> {
     let tokenizer = CL100K_TOKENIZER.lock().unwrap();
     Ok(tokenizer.is_some())
@@ -327,6 +343,12 @@ fn is_cached_o200k() -> PyResult<bool> {
 #[pyfunction]
 fn is_cached_deepseek() -> PyResult<bool> {
     let tokenizer = DEEPSEEK_TOKENIZER.lock().unwrap();
+    Ok(tokenizer.is_some())
+}
+
+#[pyfunction]
+fn is_cached_deepseek_32() -> PyResult<bool> {
+    let tokenizer = DEEPSEEK_32_TOKENIZER.lock().unwrap();
     Ok(tokenizer.is_some())
 }
 

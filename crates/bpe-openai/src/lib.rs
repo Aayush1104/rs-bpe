@@ -90,6 +90,26 @@ static BPE_DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
     tokenizer
 });
 
+static BPE_DEEPSEEK_32: LazyLock<Tokenizer> = LazyLock::new(|| {
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bpe_deepseek_32.dict"));
+    let bpe = rmp_serde::from_slice(bytes).expect("valid bpe data");
+    let pat1 = "\\p{N}{1,3}|[一-龥぀-ゟ゠-ヿ]+|[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|[^\\s]";
+    let pat2 = "\\s+\\s";
+    let pat3 = "\\s+";
+    let mut tokenizer =
+        Tokenizer::new_lookahead(bpe, &[(pat1, false), (pat2, true), (pat3, false)], false)
+            .expect("valid regex");
+    let special_tokens: HashMap<String, u32> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/deepseek_32_special.json"
+    )))
+    .expect("valid deepseek_32 special tokens json");
+    tokenizer
+        .set_special_tokens(special_tokens)
+        .expect("valid special tokens");
+    tokenizer
+});
+
 pub use bpe::*;
 
 /// A byte-pair encoding tokenizer that supports a pre-tokenization regex.
@@ -1010,6 +1030,10 @@ pub fn deepseek_base() -> &'static Tokenizer {
     &BPE_DEEPSEEK_BASE
 }
 
+pub fn deepseek_32() -> &'static Tokenizer {
+    &BPE_DEEPSEEK_32
+}
+
 fn build_special_tokens(
     special_tokens: impl IntoIterator<Item = (String, u32)>,
 ) -> Result<Option<SpecialTokens>, SpecialTokenError> {
@@ -1090,7 +1114,7 @@ mod tests {
     #[test]
     fn test_bom_no_truncate() {
         let text = "hello \u{feff} world";
-        for tok in [cl100k_base(), o200k_base(), deepseek_base()] {
+        for tok in [cl100k_base(), o200k_base(), deepseek_base(), deepseek_32()] {
             let tokens = tok.encode(text, None);
             let decoded = tok.decode(&tokens);
             assert_eq!(decoded.as_deref(), Some(text));
@@ -1278,5 +1302,18 @@ mod tests {
         let encoded = tok.encode(text, None);
         let decoded = tok.decode(&encoded);
         assert_eq!(decoded.as_deref(), Some(text));
+    }
+
+    #[test]
+    fn test_deepseek_32_special_tokens_loaded() {
+        let tok = deepseek_32();
+        let specials = tok
+            .special_tokens()
+            .expect("deepseek_32 should expose special tokens");
+        assert_eq!(specials.get("<think>").copied(), Some(128798));
+
+        let encoded = tok.encode("<think>", None);
+        assert_eq!(encoded, vec![128798]);
+        assert_eq!(tok.decode(&encoded).as_deref(), Some("<think>"));
     }
 }

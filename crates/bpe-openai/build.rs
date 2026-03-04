@@ -22,6 +22,11 @@ fn main() {
         include_bytes!("data/deepseek_base.tiktoken.gz"),
         11455197102966937341,
     );
+    serialize_tiktoken_bpe(
+        "deepseek_32",
+        include_bytes!("data/deepseek_32.tiktoken.gz"),
+        13725362973848957249,
+    );
     println!("cargo::rerun-if-changed=build.rs");
 }
 

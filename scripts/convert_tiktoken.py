@@ -66,11 +66,10 @@ def convert_hf_to_tiktoken(
     special_token_ids: set = set()
 
     for token_info in added_tokens:
-        if token_info.get("special", False):
-            content = token_info["content"]
-            token_id = token_info["id"]
-            special_tokens[content] = token_id
-            special_token_ids.add(token_id)
+        content = token_info["content"]
+        token_id = token_info["id"]
+        special_tokens[content] = token_id
+        special_token_ids.add(token_id)
 
     # 4. Build rank mapping
     # tiktoken rank determines BPE merge priority
