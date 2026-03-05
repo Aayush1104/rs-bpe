@@ -1,6 +1,8 @@
 use once_cell::sync::Lazy;
+use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyAny, PyDict, PyList, PyTuple};
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -19,6 +21,167 @@ static CL100K_INIT: Once = Once::new();
 static O200K_INIT: Once = Once::new();
 static DEEPSEEK_INIT: Once = Once::new();
 static DEEPSEEK_32_INIT: Once = Once::new();
+
+fn py_to_json(value: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
+    if value.is_none() {
+        return Ok(JsonValue::Null);
+    }
+    if let Ok(v) = value.extract::<bool>() {
+        return Ok(JsonValue::Bool(v));
+    }
+    if let Ok(v) = value.extract::<i64>() {
+        return Ok(JsonValue::Number(v.into()));
+    }
+    if let Ok(v) = value.extract::<u64>() {
+        return Ok(JsonValue::Number(v.into()));
+    }
+    if let Ok(v) = value.extract::<f64>() {
+        let number = JsonNumber::from_f64(v)
+            .ok_or_else(|| PyValueError::new_err("invalid floating-point value in JSON payload"))?;
+        return Ok(JsonValue::Number(number));
+    }
+    if let Ok(v) = value.extract::<String>() {
+        return Ok(JsonValue::String(v));
+    }
+    if let Ok(list) = value.downcast::<PyList>() {
+        let mut out = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            out.push(py_to_json(&item)?);
+        }
+        return Ok(JsonValue::Array(out));
+    }
+    if let Ok(tuple) = value.downcast::<PyTuple>() {
+        let mut out = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            out.push(py_to_json(&item)?);
+        }
+        return Ok(JsonValue::Array(out));
+    }
+    if let Ok(dict) = value.downcast::<PyDict>() {
+        let mut out = JsonMap::new();
+        for (key, item) in dict.iter() {
+            let key = key.extract::<String>().map_err(|_| {
+                PyTypeError::new_err("JSON object keys must be strings for apply_chat_template")
+            })?;
+            out.insert(key, py_to_json(&item)?);
+        }
+        return Ok(JsonValue::Object(out));
+    }
+
+    Err(PyTypeError::new_err(
+        "unsupported Python value type for apply_chat_template",
+    ))
+}
+
+fn dict_get_optional_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+    let Some(value) = dict.get_item(key)? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    value
+        .extract::<String>()
+        .map(Some)
+        .map_err(|_| PyTypeError::new_err(format!("'{key}' must be a string or None")))
+}
+
+fn parse_function_call(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<::bpe_openai::deepseek_v32::FunctionCallInput> {
+    let function_dict = value
+        .downcast::<PyDict>()
+        .map_err(|_| PyTypeError::new_err("'function' must be a dict"))?;
+
+    Ok(::bpe_openai::deepseek_v32::FunctionCallInput {
+        name: dict_get_optional_string(function_dict, "name")?,
+        arguments: dict_get_optional_string(function_dict, "arguments")?,
+    })
+}
+
+fn parse_tool_calls(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<::bpe_openai::deepseek_v32::ToolCallInput>> {
+    let list = value
+        .downcast::<PyList>()
+        .map_err(|_| PyTypeError::new_err("'tool_calls' must be a list"))?;
+
+    let mut out = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        let dict = item
+            .downcast::<PyDict>()
+            .map_err(|_| PyTypeError::new_err("each item in 'tool_calls' must be a dict"))?;
+        let function = match dict.get_item("function")? {
+            Some(function_value) => parse_function_call(&function_value)?,
+            None => ::bpe_openai::deepseek_v32::FunctionCallInput::default(),
+        };
+        out.push(::bpe_openai::deepseek_v32::ToolCallInput { function });
+    }
+
+    Ok(out)
+}
+
+fn parse_tools(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<::bpe_openai::deepseek_v32::ToolDefinition>> {
+    let list = value
+        .downcast::<PyList>()
+        .map_err(|_| PyTypeError::new_err("'tools' must be a list"))?;
+
+    let mut out = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        let dict = item
+            .downcast::<PyDict>()
+            .map_err(|_| PyTypeError::new_err("each item in 'tools' must be a dict"))?;
+        let function = match dict.get_item("function")? {
+            Some(function_value) => py_to_json(&function_value)?,
+            None => JsonValue::Null,
+        };
+        out.push(::bpe_openai::deepseek_v32::ToolDefinition { function });
+    }
+    Ok(out)
+}
+
+fn parse_messages(value: &Bound<'_, PyAny>) -> PyResult<Vec<::bpe_openai::deepseek_v32::Message>> {
+    let list = value
+        .downcast::<PyList>()
+        .map_err(|_| PyTypeError::new_err("messages/context must be a list of dict"))?;
+
+    let mut out = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        let dict = item
+            .downcast::<PyDict>()
+            .map_err(|_| PyTypeError::new_err("each message must be a dict"))?;
+
+        let role = dict_get_optional_string(dict, "role")?.unwrap_or_default();
+        let content = dict_get_optional_string(dict, "content")?;
+        let reasoning_content = dict_get_optional_string(dict, "reasoning_content")?;
+
+        let tools = match dict.get_item("tools")? {
+            Some(v) if !v.is_none() => Some(parse_tools(&v)?),
+            _ => None,
+        };
+        let response_format = match dict.get_item("response_format")? {
+            Some(v) if !v.is_none() => Some(py_to_json(&v)?),
+            _ => None,
+        };
+        let tool_calls = match dict.get_item("tool_calls")? {
+            Some(v) if !v.is_none() => Some(parse_tool_calls(&v)?),
+            _ => None,
+        };
+
+        out.push(::bpe_openai::deepseek_v32::Message {
+            role,
+            content,
+            tools,
+            response_format,
+            tool_calls,
+            reasoning_content,
+        });
+    }
+
+    Ok(out)
+}
 
 /// Python wrapper for ParallelOptions
 #[pyclass]
@@ -245,6 +408,47 @@ impl Tokenizer {
             .0
             .split_chunks(input.as_ref(), chunk_size, allowed_special_refs.as_ref());
         PyList::new(py, chunks)
+    }
+
+    #[pyo3(signature = (messages, thinking_mode = "chat", context = None, drop_thinking = true, add_default_bos_token = true))]
+    fn apply_chat_template(
+        &self,
+        messages: &Bound<'_, PyAny>,
+        thinking_mode: &str,
+        context: Option<&Bound<'_, PyAny>>,
+        drop_thinking: bool,
+        add_default_bos_token: bool,
+    ) -> PyResult<String> {
+        if !std::ptr::eq(self.0, ::bpe_openai::deepseek_32()) {
+            return Err(PyNotImplementedError::new_err(
+                "Tokenizer.apply_chat_template is only supported for deepseek_32()",
+            ));
+        }
+
+        let thinking_mode = match thinking_mode.to_ascii_lowercase().as_str() {
+            "chat" => ::bpe_openai::deepseek_v32::ThinkingMode::Chat,
+            "thinking" => ::bpe_openai::deepseek_v32::ThinkingMode::Thinking,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "thinking_mode must be either 'chat' or 'thinking'",
+                ))
+            }
+        };
+
+        let rust_messages = parse_messages(messages)?;
+        let rust_context = match context {
+            Some(ctx) if !ctx.is_none() => Some(parse_messages(ctx)?),
+            _ => None,
+        };
+
+        ::bpe_openai::deepseek_v32::apply_chat_template(
+            &rust_messages,
+            thinking_mode,
+            rust_context.as_deref(),
+            drop_thinking,
+            add_default_bos_token,
+        )
+        .map_err(|err| PyValueError::new_err(err.to_string()))
     }
 
     #[getter]

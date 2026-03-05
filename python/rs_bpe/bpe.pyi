@@ -54,6 +54,14 @@ class Tokenizer:
         chunk_size: int = 64,
         allowed_special: set[str] | None = ...,
     ) -> list[str]: ...
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, object]],
+        thinking_mode: str = "chat",
+        context: list[dict[str, object]] | None = ...,
+        drop_thinking: bool = True,
+        add_default_bos_token: bool = True,
+    ) -> str: ...
     @property
     def special_tokens(self) -> dict[str, int] | None: ...
     @property

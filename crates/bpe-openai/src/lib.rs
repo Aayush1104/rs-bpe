@@ -16,6 +16,7 @@ use regex_automata::{
     Anchored, Input,
 };
 
+pub mod deepseek_v32;
 pub mod normalizer;
 
 pub use normalizer::{Normalizable, NormalizedString};
