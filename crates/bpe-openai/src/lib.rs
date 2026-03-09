@@ -17,6 +17,7 @@ use regex_automata::{
 };
 
 pub mod deepseek_v32;
+pub mod kimi_k2;
 pub mod normalizer;
 
 pub use normalizer::{Normalizable, NormalizedString};
@@ -85,6 +86,34 @@ static BPE_DEEPSEEK_BASE: LazyLock<Tokenizer> = LazyLock::new(|| {
         "/data/deepseek_base_special.json"
     )))
     .expect("valid deepseek special tokens json");
+    tokenizer
+        .set_special_tokens(special_tokens)
+        .expect("valid special tokens");
+    tokenizer
+});
+
+static BPE_KIMI_K2: LazyLock<Tokenizer> = LazyLock::new(|| {
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bpe_kimi_k2.dict"));
+    let bpe = rmp_serde::from_slice(bytes).expect("valid bpe data");
+    let pat1 = [
+        "[\\p{Han}]+",
+        "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}--\\p{Han}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}--\\p{Han}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+        "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}--\\p{Han}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}--\\p{Han}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+        "\\p{N}{1,3}",
+        " ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*",
+        "\\s*[\\r\\n]+",
+        "\\s+$",
+    ].join("|");
+    let pat2 = "\\s+\\s";
+    let pat3 = "\\s+";
+    let mut tokenizer =
+        Tokenizer::new_lookahead(bpe, &[(&pat1, false), (pat2, true), (pat3, false)], false)
+            .expect("valid regex");
+    let special_tokens: HashMap<String, u32> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/kimi_k2_special.json"
+    )))
+    .expect("valid kimi_k2 special tokens json");
     tokenizer
         .set_special_tokens(special_tokens)
         .expect("valid special tokens");
@@ -1031,6 +1060,10 @@ pub fn deepseek_base() -> &'static Tokenizer {
     &BPE_DEEPSEEK_BASE
 }
 
+pub fn kimi_k2() -> &'static Tokenizer {
+    &BPE_KIMI_K2
+}
+
 pub fn deepseek_32() -> &'static Tokenizer {
     &BPE_DEEPSEEK_32
 }
@@ -1115,7 +1148,7 @@ mod tests {
     #[test]
     fn test_bom_no_truncate() {
         let text = "hello \u{feff} world";
-        for tok in [cl100k_base(), o200k_base(), deepseek_base(), deepseek_32()] {
+        for tok in [cl100k_base(), o200k_base(), deepseek_base(), deepseek_32(), kimi_k2()] {
             let tokens = tok.encode(text, None);
             let decoded = tok.decode(&tokens);
             assert_eq!(decoded.as_deref(), Some(text));
@@ -1316,5 +1349,54 @@ mod tests {
         let encoded = tok.encode("<think>", None);
         assert_eq!(encoded, vec![128798]);
         assert_eq!(tok.decode(&encoded).as_deref(), Some("<think>"));
+    }
+
+    #[test]
+    fn test_kimi_k2_special_tokens_loaded() {
+        let tok = kimi_k2();
+        let specials = tok
+            .special_tokens()
+            .expect("kimi_k2 should expose special tokens");
+        assert_eq!(specials.get("[BOS]").copied(), Some(163584));
+        assert_eq!(specials.get("[EOS]").copied(), Some(163585));
+        assert_eq!(specials.get("<|im_end|>").copied(), Some(163586));
+        assert_eq!(specials.get("<|im_user|>").copied(), Some(163587));
+        assert_eq!(specials.get("<|im_assistant|>").copied(), Some(163588));
+        assert_eq!(specials.get("<|im_system|>").copied(), Some(163594));
+        assert_eq!(specials.get("<|im_middle|>").copied(), Some(163601));
+
+        let encoded = tok.encode("<|im_end|>", None);
+        assert_eq!(encoded, vec![163586]);
+        assert_eq!(tok.decode(&encoded).as_deref(), Some("<|im_end|>"));
+    }
+
+    #[test]
+    fn test_kimi_k2_basic_encoding() {
+        let tok = kimi_k2();
+        let text = "Hello, world!";
+        let encoded = tok.encode(text, None);
+        assert!(!encoded.is_empty());
+        let decoded = tok.decode(&encoded);
+        assert_eq!(decoded.as_deref(), Some(text));
+    }
+
+    #[test]
+    fn test_kimi_k2_chinese() {
+        let tok = kimi_k2();
+        let text = "你好世界";
+        let encoded = tok.encode(text, None);
+        assert!(!encoded.is_empty());
+        let decoded = tok.decode(&encoded);
+        assert_eq!(decoded.as_deref(), Some(text));
+    }
+
+    #[test]
+    fn test_kimi_k2_mixed_cjk_latin() {
+        let tok = kimi_k2();
+        let text = "Hello你好World世界";
+        let encoded = tok.encode(text, None);
+        assert!(!encoded.is_empty());
+        let decoded = tok.decode(&encoded);
+        assert_eq!(decoded.as_deref(), Some(text));
     }
 }

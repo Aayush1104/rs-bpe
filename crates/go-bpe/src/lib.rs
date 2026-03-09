@@ -37,10 +37,25 @@ pub extern "C" fn rsbpe_new_deepseek() -> *mut RsBpeTokenizer {
     Box::into_raw(Box::new(tok))
 }
 
+/// Create a new Kimi K2 tokenizer handle.
+///
+/// Returns a heap-allocated `RsBpeTokenizer` wrapping the static singleton.
+/// The caller owns the returned pointer and must free it with `rsbpe_free_tokenizer`.
+///
+/// # Safety
+/// The returned pointer is valid until freed with `rsbpe_free_tokenizer`.
+#[no_mangle]
+pub extern "C" fn rsbpe_new_kimi_k2() -> *mut RsBpeTokenizer {
+    let tok = RsBpeTokenizer {
+        inner: bpe_openai::kimi_k2(),
+    };
+    Box::into_raw(Box::new(tok))
+}
+
 /// Encode a UTF-8 text string into token IDs.
 ///
 /// # Parameters
-/// - `handle`: Pointer to a tokenizer created by `rsbpe_new_deepseek`.
+/// - `handle`: Pointer to a tokenizer created by `rsbpe_new_deepseek` or `rsbpe_new_kimi_k2`.
 /// - `text_ptr`: Pointer to UTF-8 encoded text bytes (does not need to be null-terminated).
 /// - `text_len`: Length of the text in bytes.
 ///
@@ -50,7 +65,7 @@ pub extern "C" fn rsbpe_new_deepseek() -> *mut RsBpeTokenizer {
 /// On error (error_code != 0), `tokens` is null and `len` is 0.
 ///
 /// # Safety
-/// - `handle` must be a valid pointer from `rsbpe_new_deepseek`.
+/// - `handle` must be a valid pointer from `rsbpe_new_deepseek` or `rsbpe_new_kimi_k2`.
 /// - `text_ptr` must point to `text_len` valid bytes.
 /// - The text is only borrowed for the duration of this call.
 #[no_mangle]
@@ -116,10 +131,10 @@ pub unsafe extern "C" fn rsbpe_free_tokens(tokens: *mut u32, len: usize) {
     }
 }
 
-/// Free a tokenizer handle previously returned by `rsbpe_new_deepseek`.
+/// Free a tokenizer handle previously returned by `rsbpe_new_deepseek` or `rsbpe_new_kimi_k2`.
 ///
 /// # Safety
-/// - `handle` must be a pointer returned by `rsbpe_new_deepseek`, or null.
+/// - `handle` must be a pointer returned by `rsbpe_new_deepseek` or `rsbpe_new_kimi_k2`, or null.
 /// - Must only be called once per handle.
 #[no_mangle]
 pub unsafe extern "C" fn rsbpe_free_tokenizer(handle: *mut RsBpeTokenizer) {

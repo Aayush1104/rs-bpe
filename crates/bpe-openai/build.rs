@@ -27,6 +27,11 @@ fn main() {
         include_bytes!("data/deepseek_32.tiktoken.gz"),
         13725362973848957249,
     );
+    serialize_tiktoken_bpe(
+        "kimi_k2",
+        include_bytes!("data/kimi_k2.tiktoken.gz"),
+        3889465912966995173,
+    );
     println!("cargo::rerun-if-changed=build.rs");
 }
 

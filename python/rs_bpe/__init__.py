@@ -20,7 +20,9 @@ from .bpe import (
     is_cached_cl100k,
     is_cached_deepseek,
     is_cached_deepseek_32,
+    is_cached_kimi_k2,
     is_cached_o200k,
+    kimi_k2,
     o200k_base,
 )
 
@@ -36,6 +38,8 @@ __all__ = [
     "is_cached_cl100k",
     "is_cached_deepseek",
     "is_cached_deepseek_32",
+    "is_cached_kimi_k2",
     "is_cached_o200k",
+    "kimi_k2",
     "o200k_base",
 ]

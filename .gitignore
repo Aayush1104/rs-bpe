@@ -102,6 +102,7 @@ wheels/
 MANIFEST
 
 *.AppImage
+.dataset_cache/
 THEME.md
 .cursorignore
 cursor-utils.yaml

@@ -20,6 +20,7 @@ def test_module_structure():
     assert hasattr(rs_bpe, "o200k_base")
     assert hasattr(rs_bpe, "deepseek_base")
     assert hasattr(rs_bpe, "deepseek_32")
+    assert hasattr(rs_bpe, "kimi_k2")
     assert hasattr(rs_bpe, "Tokenizer")
     assert hasattr(rs_bpe, "ParallelOptions")
 
@@ -80,6 +81,7 @@ def test_tokenizer_basic():
         rs_bpe.o200k_base,
         rs_bpe.deepseek_base,
         rs_bpe.deepseek_32,
+        rs_bpe.kimi_k2,
     ],
 )
 def test_tokenizer_various_inputs(input_string, tokenizer_func):

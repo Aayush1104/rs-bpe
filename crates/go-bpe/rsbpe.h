@@ -21,6 +21,9 @@ typedef struct {
 /* Create a DeepSeek tokenizer. Caller owns the returned pointer. */
 RsBpeTokenizer *rsbpe_new_deepseek(void);
 
+/* Create a Kimi K2 tokenizer. Caller owns the returned pointer. */
+RsBpeTokenizer *rsbpe_new_kimi_k2(void);
+
 /* Encode UTF-8 text into token IDs. text_ptr need not be null-terminated. */
 RsBpeEncodeResult rsbpe_encode(const RsBpeTokenizer *handle,
                                const char *text_ptr,
@@ -29,7 +32,7 @@ RsBpeEncodeResult rsbpe_encode(const RsBpeTokenizer *handle,
 /* Free a token array returned by rsbpe_encode. */
 void rsbpe_free_tokens(uint32_t *tokens, size_t len);
 
-/* Free a tokenizer handle returned by rsbpe_new_deepseek. */
+/* Free a tokenizer handle returned by rsbpe_new_deepseek or rsbpe_new_kimi_k2. */
 void rsbpe_free_tokenizer(RsBpeTokenizer *handle);
 
 #ifdef __cplusplus
