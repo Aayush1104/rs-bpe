@@ -22,7 +22,7 @@ pub mod normalizer;
 
 pub use normalizer::{Normalizable, NormalizedString};
 // Global thread pool optimized for tokenization workloads
-static TOKENIZER_POOL: Lazy<rayon::ThreadPool> = Lazy::new(|| {
+pub(crate) static TOKENIZER_POOL: Lazy<rayon::ThreadPool> = Lazy::new(|| {
     ThreadPoolBuilder::new()
         .num_threads(get_optimal_thread_count())
         .thread_name(|i| format!("tokenizer-{}", i))
@@ -370,6 +370,27 @@ impl Tokenizer {
             Segment::Special(token) => encoded.push(token),
         });
         encoded
+    }
+
+    /// Encodes text without scanning for special tokens.
+    /// Only applies normalization, regex pre-tokenization, and BPE encoding.
+    /// Use this when special tokens are emitted directly as IDs (e.g., in
+    /// `tokenize_messages_direct`) and the text is known to contain only content.
+    pub fn encode_text_only<'a, I: Normalizable<'a>>(&self, text: I) -> Vec<u32> {
+        let text = self.normalize(text);
+        let mut encoded = Vec::new();
+        self.encode_text_segment(text.as_str(), &mut encoded);
+        encoded
+    }
+
+    /// Like [`encode_text_only`](Self::encode_text_only) but appends tokens to an existing buffer.
+    pub fn encode_text_only_into<'a, I: Normalizable<'a>>(
+        &self,
+        text: I,
+        encoded: &mut Vec<u32>,
+    ) {
+        let text = self.normalize(text);
+        self.encode_text_segment(text.as_str(), encoded);
     }
 
     /// Encodes multiple texts efficiently in a single batch operation.

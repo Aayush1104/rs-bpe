@@ -551,6 +551,31 @@ impl Tokenizer {
         .map_err(|err| PyValueError::new_err(err.to_string()))
     }
 
+    #[pyo3(signature = (messages, tools = None, add_generation_prompt = true))]
+    fn tokenize_messages_direct(
+        &self,
+        messages: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+        add_generation_prompt: bool,
+    ) -> PyResult<Vec<u32>> {
+        if !std::ptr::eq(self.0, ::bpe_openai::kimi_k2()) {
+            return Err(PyNotImplementedError::new_err(
+                "tokenize_messages_direct is only supported for kimi_k2()",
+            ));
+        }
+        let rust_messages = parse_kimi_messages(messages)?;
+        let rust_tools = match tools {
+            Some(t) if !t.is_none() => Some(parse_kimi_tools(t)?),
+            _ => None,
+        };
+        ::bpe_openai::kimi_k2::tokenize_messages_direct(
+            &rust_messages,
+            rust_tools.as_deref(),
+            add_generation_prompt,
+        )
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+    }
+
     #[getter]
     fn special_tokens(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
         let special_tokens = match self.0.special_tokens() {
@@ -571,11 +596,55 @@ impl Tokenizer {
     }
 }
 
+/// Stateful Kimi K2 chat encoder with message-level caching, parallel
+/// encoding, and buffer reuse.
+#[pyclass]
+struct KimiChatEncoder {
+    inner: ::bpe_openai::kimi_k2::ChatEncoder,
+}
+
+#[pymethods]
+impl KimiChatEncoder {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: ::bpe_openai::kimi_k2::ChatEncoder::new(),
+        }
+    }
+
+    #[pyo3(signature = (messages, tools = None, add_generation_prompt = true))]
+    fn encode_messages(
+        &mut self,
+        messages: &Bound<'_, PyAny>,
+        tools: Option<&Bound<'_, PyAny>>,
+        add_generation_prompt: bool,
+    ) -> PyResult<Vec<u32>> {
+        let rust_messages = parse_kimi_messages(messages)?;
+        let rust_tools = match tools {
+            Some(t) if !t.is_none() => Some(parse_kimi_tools(t)?),
+            _ => None,
+        };
+        self.inner
+            .encode_messages(&rust_messages, rust_tools.as_deref(), add_generation_prompt)
+            .map_err(|err| PyValueError::new_err(err.to_string()))
+    }
+
+    #[getter]
+    fn cache_len(&self) -> usize {
+        self.inner.cache_len()
+    }
+
+    fn clear_cache(&mut self) {
+        self.inner.clear_cache();
+    }
+}
+
 /// BPE tokenizer interface
 #[pymodule]
 fn bpe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Tokenizer>()?;
     m.add_class::<ParallelOptions>()?;
+    m.add_class::<KimiChatEncoder>()?;
     m.add_function(wrap_pyfunction!(cl100k_base, m)?)?;
     m.add_function(wrap_pyfunction!(o200k_base, m)?)?;
     m.add_function(wrap_pyfunction!(deepseek_base, m)?)?;

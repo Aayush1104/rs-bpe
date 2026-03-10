@@ -11,6 +11,7 @@ Project Dependencies:
 """
 
 from .bpe import (
+    KimiChatEncoder,
     ParallelOptions,
     Tokenizer,
     cl100k_base,
@@ -29,6 +30,7 @@ from .bpe import (
 # Package metadata
 __version__ = "0.1.0"
 __all__ = [
+    "KimiChatEncoder",
     "ParallelOptions",
     "Tokenizer",
     "cl100k_base",
