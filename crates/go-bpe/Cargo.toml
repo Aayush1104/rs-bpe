@@ -9,3 +9,5 @@ crate-type = ["staticlib"]
 
 [dependencies]
 bpe-openai = { version = "0.1.0", path = "../bpe-openai" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
