@@ -42,6 +42,51 @@ const DEFAULT_SYSTEM_PROMPT: &str = "You are Kimi, an AI assistant created by Mo
 const PARALLEL_THRESHOLD: usize = 4;
 
 // ---------------------------------------------------------------------------
+// Encoding statistics & configuration
+// ---------------------------------------------------------------------------
+
+/// Statistics collected during `ChatEncoder::encode_messages` calls.
+/// Tracks cache utilisation and parallelism decisions.
+#[derive(Debug, Clone, Default)]
+pub struct EncodeStats {
+    pub total_messages: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub parallel_batches: u64,
+    pub sequential_batches: u64,
+}
+
+impl EncodeStats {
+    /// Cache hit rate as a fraction in [0, 1]. Returns 0.0 when no messages have been processed.
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.cache_hits + self.cache_misses;
+        if total == 0 {
+            return 0.0;
+        }
+        self.cache_hits as f64 / total as f64
+    }
+}
+
+/// Fine-grained feature toggles for `ChatEncoder`.
+/// All flags default to `true`, matching the fully-optimised path.
+#[derive(Debug, Clone)]
+pub struct ChatEncoderConfig {
+    pub enable_cache: bool,
+    pub enable_parallel: bool,
+    pub enable_buffer_reuse: bool,
+}
+
+impl Default for ChatEncoderConfig {
+    fn default() -> Self {
+        Self {
+            enable_cache: true,
+            enable_parallel: true,
+            enable_buffer_reuse: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
 
@@ -390,13 +435,23 @@ pub struct ChatEncoder {
     cache: HashMap<u64, Vec<u32>>,
     /// Reusable output buffer (Step 4: avoids reallocation across calls).
     token_buffer: Vec<u32>,
+    /// Feature toggles.
+    config: ChatEncoderConfig,
+    /// Cumulative encoding statistics.
+    stats: EncodeStats,
 }
 
 impl ChatEncoder {
     pub fn new() -> Self {
+        Self::new_with_config(ChatEncoderConfig::default())
+    }
+
+    pub fn new_with_config(config: ChatEncoderConfig) -> Self {
         Self {
             cache: HashMap::new(),
             token_buffer: Vec::new(),
+            config,
+            stats: EncodeStats::default(),
         }
     }
 
@@ -410,18 +465,37 @@ impl ChatEncoder {
         self.cache.clear();
     }
 
-    /// Encode a message sequence, reusing cached tokens for unchanged messages.
-    /// Uncached messages are encoded in parallel when there are enough of them.
-    pub fn encode_messages(
+    /// Returns a snapshot of the cumulative statistics.
+    pub fn stats(&self) -> &EncodeStats {
+        &self.stats
+    }
+
+    /// Resets the cumulative statistics to zero.
+    pub fn reset_stats(&mut self) {
+        self.stats = EncodeStats::default();
+    }
+
+    /// Encode a message sequence, returning a borrowed slice of the internal buffer.
+    ///
+    /// This is the zero-copy path: the returned slice points directly into
+    /// `self.token_buffer`, avoiding a ~300KB clone for 75K-token conversations.
+    ///
+    /// The borrow checker ensures the caller cannot call any `&mut self` method
+    /// while holding the returned reference.
+    pub fn encode_messages_ref(
         &mut self,
         messages: &[Message],
         tools: Option<&[Value]>,
         add_generation_prompt: bool,
-    ) -> Result<Vec<u32>, EncodeMessagesError> {
+    ) -> Result<&[u32], EncodeMessagesError> {
         let tokenizer = kimi_k2();
 
-        // Step 4: reuse buffer capacity from previous call
-        self.token_buffer.clear();
+        // Step 4: buffer reuse — reuse capacity or allocate fresh
+        if self.config.enable_buffer_reuse {
+            self.token_buffer.clear();
+        } else {
+            self.token_buffer = Vec::new();
+        }
 
         // Tools prefix (not cached — typically small and may vary)
         if let Some(tools) = tools {
@@ -432,37 +506,57 @@ impl ChatEncoder {
 
         // Step 2: compute hashes and identify uncached messages
         let hashes: Vec<u64> = messages.iter().map(|m| hash_message(m)).collect();
-        let uncached: Vec<usize> = hashes
-            .iter()
-            .enumerate()
-            .filter(|(_, h)| !self.cache.contains_key(h))
-            .map(|(i, _)| i)
-            .collect();
+        let uncached: Vec<usize> = if self.config.enable_cache {
+            hashes
+                .iter()
+                .enumerate()
+                .filter(|(_, h)| !self.cache.contains_key(h))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            // Cache disabled — treat every message as uncached
+            (0..messages.len()).collect()
+        };
+
+        // Track stats
+        let msg_count = messages.len() as u64;
+        self.stats.total_messages += msg_count;
+        let hits = msg_count - uncached.len() as u64;
+        self.stats.cache_hits += hits;
+        self.stats.cache_misses += uncached.len() as u64;
 
         // Step 3: encode uncached messages (parallel when beneficial)
         if !uncached.is_empty() {
-            let new_entries: Vec<(u64, Result<Vec<u32>, EncodeMessagesError>)> =
-                if uncached.len() >= PARALLEL_THRESHOLD {
-                    TOKENIZER_POOL.install(|| {
-                        uncached
-                            .par_iter()
-                            .map(|&i| {
-                                let h = hashes[i];
-                                let result = encode_single_message_vec(&messages[i], tokenizer);
-                                (h, result)
-                            })
-                            .collect()
-                    })
-                } else {
+            let use_parallel =
+                self.config.enable_parallel && uncached.len() >= PARALLEL_THRESHOLD;
+
+            if use_parallel {
+                self.stats.parallel_batches += 1;
+            } else {
+                self.stats.sequential_batches += 1;
+            }
+
+            let new_entries: Vec<(u64, Result<Vec<u32>, EncodeMessagesError>)> = if use_parallel {
+                TOKENIZER_POOL.install(|| {
                     uncached
-                        .iter()
+                        .par_iter()
                         .map(|&i| {
                             let h = hashes[i];
                             let result = encode_single_message_vec(&messages[i], tokenizer);
                             (h, result)
                         })
                         .collect()
-                };
+                })
+            } else {
+                uncached
+                    .iter()
+                    .map(|&i| {
+                        let h = hashes[i];
+                        let result = encode_single_message_vec(&messages[i], tokenizer);
+                        (h, result)
+                    })
+                    .collect()
+            };
 
             for (h, result) in new_entries {
                 let tokens = result?;
@@ -485,7 +579,26 @@ impl ChatEncoder {
             encode_generation_prompt(tokenizer, &mut self.token_buffer);
         }
 
-        Ok(self.token_buffer.clone())
+        // When cache is disabled, clear it after assembly so it doesn't persist
+        if !self.config.enable_cache {
+            self.cache.clear();
+        }
+
+        Ok(&self.token_buffer)
+    }
+
+    /// Convenience wrapper that returns an owned `Vec<u32>`.
+    ///
+    /// Use [`encode_messages_ref`] in performance-critical paths where you
+    /// can consume the slice immediately (e.g. the FFI borrowed path).
+    pub fn encode_messages(
+        &mut self,
+        messages: &[Message],
+        tools: Option<&[Value]>,
+        add_generation_prompt: bool,
+    ) -> Result<Vec<u32>, EncodeMessagesError> {
+        self.encode_messages_ref(messages, tools, add_generation_prompt)
+            .map(|s| s.to_vec())
     }
 }
 
@@ -755,5 +868,158 @@ mod tests {
         assert_eq!(encoder.cache_len(), 1);
         encoder.clear_cache();
         assert_eq!(encoder.cache_len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // ChatEncoderConfig + EncodeStats tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stats_basic() {
+        let mut encoder = ChatEncoder::new();
+        assert_eq!(encoder.stats().total_messages, 0);
+        assert_eq!(encoder.stats().hit_rate(), 0.0);
+
+        let msgs = vec![Message::new("user", "hello")];
+        let _ = encoder.encode_messages(&msgs, None, true).unwrap();
+
+        assert_eq!(encoder.stats().total_messages, 1);
+        assert_eq!(encoder.stats().cache_misses, 1);
+        assert_eq!(encoder.stats().cache_hits, 0);
+        assert_eq!(encoder.stats().hit_rate(), 0.0);
+
+        // Second call — same message should be a cache hit
+        let _ = encoder.encode_messages(&msgs, None, true).unwrap();
+        assert_eq!(encoder.stats().total_messages, 2);
+        assert_eq!(encoder.stats().cache_hits, 1);
+        assert_eq!(encoder.stats().cache_misses, 1);
+        assert!((encoder.stats().hit_rate() - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_stats_multi_turn() {
+        let mut encoder = ChatEncoder::new();
+
+        let msgs1 = vec![Message::new("user", "hello")];
+        let _ = encoder.encode_messages(&msgs1, None, true).unwrap();
+        // 1 miss
+        assert_eq!(encoder.stats().cache_misses, 1);
+
+        let msgs2 = vec![
+            Message::new("user", "hello"),
+            Message::new("assistant", "Hi!"),
+            Message::new("user", "how are you?"),
+        ];
+        let _ = encoder.encode_messages(&msgs2, None, true).unwrap();
+        // 1 hit (hello) + 2 misses (Hi!, how are you?)
+        assert_eq!(encoder.stats().cache_hits, 1);
+        assert_eq!(encoder.stats().cache_misses, 3); // 1 + 2
+        assert_eq!(encoder.stats().total_messages, 4); // 1 + 3
+    }
+
+    #[test]
+    fn test_stats_reset() {
+        let mut encoder = ChatEncoder::new();
+        let msgs = vec![Message::new("user", "hello")];
+        let _ = encoder.encode_messages(&msgs, None, true).unwrap();
+        assert!(encoder.stats().total_messages > 0);
+
+        encoder.reset_stats();
+        assert_eq!(encoder.stats().total_messages, 0);
+        assert_eq!(encoder.stats().cache_hits, 0);
+        assert_eq!(encoder.stats().cache_misses, 0);
+        assert_eq!(encoder.stats().hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_config_cache_disabled() {
+        let config = ChatEncoderConfig {
+            enable_cache: false,
+            enable_parallel: true,
+            enable_buffer_reuse: true,
+        };
+        let mut encoder = ChatEncoder::new_with_config(config);
+        let msgs = vec![Message::new("user", "hello")];
+
+        let r1 = encoder.encode_messages(&msgs, None, true).unwrap();
+        let r2 = encoder.encode_messages(&msgs, None, true).unwrap();
+
+        // Results must still be correct
+        let direct = tokenize_messages_direct(&msgs, None, true).unwrap();
+        assert_eq!(r1, direct);
+        assert_eq!(r2, direct);
+
+        // Cache should be empty after each call (cleared when disabled)
+        assert_eq!(encoder.cache_len(), 0);
+
+        // Stats should show all misses (no caching)
+        assert_eq!(encoder.stats().cache_hits, 0);
+        assert_eq!(encoder.stats().cache_misses, 2);
+    }
+
+    #[test]
+    fn test_config_parallel_disabled() {
+        let config = ChatEncoderConfig {
+            enable_cache: true,
+            enable_parallel: false,
+            enable_buffer_reuse: true,
+        };
+        let mut encoder = ChatEncoder::new_with_config(config);
+
+        // Use enough messages to normally trigger parallel (>= PARALLEL_THRESHOLD)
+        let msgs = vec![
+            Message::new("user", "msg1"),
+            Message::new("assistant", "msg2"),
+            Message::new("user", "msg3"),
+            Message::new("assistant", "msg4"),
+            Message::new("user", "msg5"),
+        ];
+
+        let result = encoder.encode_messages(&msgs, None, true).unwrap();
+        let direct = tokenize_messages_direct(&msgs, None, true).unwrap();
+        assert_eq!(result, direct);
+
+        // Should have recorded sequential, not parallel
+        assert_eq!(encoder.stats().parallel_batches, 0);
+        assert_eq!(encoder.stats().sequential_batches, 1);
+    }
+
+    #[test]
+    fn test_config_buffer_reuse_disabled() {
+        let config = ChatEncoderConfig {
+            enable_cache: true,
+            enable_parallel: true,
+            enable_buffer_reuse: false,
+        };
+        let mut encoder = ChatEncoder::new_with_config(config);
+        let msgs = vec![Message::new("user", "hello")];
+
+        let r1 = encoder.encode_messages(&msgs, None, true).unwrap();
+        let r2 = encoder.encode_messages(&msgs, None, true).unwrap();
+
+        let direct = tokenize_messages_direct(&msgs, None, true).unwrap();
+        assert_eq!(r1, direct);
+        assert_eq!(r2, direct);
+    }
+
+    #[test]
+    fn test_config_all_disabled_matches_direct() {
+        // direct-only mode: no cache, no parallel, no buffer reuse
+        let config = ChatEncoderConfig {
+            enable_cache: false,
+            enable_parallel: false,
+            enable_buffer_reuse: false,
+        };
+        let mut encoder = ChatEncoder::new_with_config(config);
+
+        let msgs = vec![
+            Message::new("user", "hello"),
+            Message::new("assistant", "Hi!"),
+            Message::new("user", "how are you?"),
+        ];
+
+        let result = encoder.encode_messages(&msgs, None, true).unwrap();
+        let direct = tokenize_messages_direct(&msgs, None, true).unwrap();
+        assert_eq!(result, direct);
     }
 }

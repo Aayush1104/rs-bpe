@@ -23,6 +23,19 @@ pub struct RsBpeEncodeResult {
     pub error_code: i32,
 }
 
+/// Result of a borrowed encode operation. The `tokens` pointer points into
+/// the encoder's internal buffer and is valid until the next mutating call
+/// on the same encoder. The caller must NOT free this pointer.
+#[repr(C)]
+pub struct RsBpeBorrowedResult {
+    /// Pointer to the encoder's internal token buffer. NOT caller-owned.
+    pub tokens: *const u32,
+    /// Number of tokens.
+    pub len: usize,
+    /// Error code: 0 = success, 2 = JSON parse error, 3 = unsupported role.
+    pub error_code: i32,
+}
+
 /// Create a new DeepSeek tokenizer handle.
 ///
 /// Returns a heap-allocated `RsBpeTokenizer` wrapping the static singleton.
@@ -214,12 +227,23 @@ pub unsafe extern "C" fn rsbpe_tokenize_messages_direct(
     }
 }
 
+/// Cache/encoding statistics returned across FFI.
+#[repr(C)]
+pub struct RsBpeCacheStats {
+    pub total_messages: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub hit_rate: f64,
+    pub parallel_batches: u64,
+    pub sequential_batches: u64,
+}
+
 /// Opaque wrapper around `kimi_k2::ChatEncoder`.
 pub struct RsBpeChatEncoder {
     inner: kimi_k2_mod::ChatEncoder,
 }
 
-/// Create a new ChatEncoder for Kimi K2.
+/// Create a new ChatEncoder for Kimi K2 with default config (all optimisations enabled).
 ///
 /// # Safety
 /// The returned pointer is valid until freed with `rsbpe_chat_encoder_free`.
@@ -229,6 +253,67 @@ pub extern "C" fn rsbpe_chat_encoder_new() -> *mut RsBpeChatEncoder {
         inner: kimi_k2_mod::ChatEncoder::new(),
     };
     Box::into_raw(Box::new(enc))
+}
+
+/// Create a new ChatEncoder with fine-grained feature toggles.
+///
+/// # Safety
+/// The returned pointer is valid until freed with `rsbpe_chat_encoder_free`.
+#[no_mangle]
+pub extern "C" fn rsbpe_chat_encoder_new_with_config(
+    enable_cache: i32,
+    enable_parallel: i32,
+    enable_buffer_reuse: i32,
+) -> *mut RsBpeChatEncoder {
+    let config = kimi_k2_mod::ChatEncoderConfig {
+        enable_cache: enable_cache != 0,
+        enable_parallel: enable_parallel != 0,
+        enable_buffer_reuse: enable_buffer_reuse != 0,
+    };
+    let enc = RsBpeChatEncoder {
+        inner: kimi_k2_mod::ChatEncoder::new_with_config(config),
+    };
+    Box::into_raw(Box::new(enc))
+}
+
+/// Return cumulative encoding statistics from the encoder.
+///
+/// # Safety
+/// `encoder` must be a valid pointer from `rsbpe_chat_encoder_new*`.
+#[no_mangle]
+pub unsafe extern "C" fn rsbpe_chat_encoder_get_stats(
+    encoder: *const RsBpeChatEncoder,
+) -> RsBpeCacheStats {
+    if encoder.is_null() {
+        return RsBpeCacheStats {
+            total_messages: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            hit_rate: 0.0,
+            parallel_batches: 0,
+            sequential_batches: 0,
+        };
+    }
+    let stats = (*encoder).inner.stats();
+    RsBpeCacheStats {
+        total_messages: stats.total_messages,
+        cache_hits: stats.cache_hits,
+        cache_misses: stats.cache_misses,
+        hit_rate: stats.hit_rate(),
+        parallel_batches: stats.parallel_batches,
+        sequential_batches: stats.sequential_batches,
+    }
+}
+
+/// Reset cumulative encoding statistics to zero.
+///
+/// # Safety
+/// `encoder` must be a valid pointer from `rsbpe_chat_encoder_new*`.
+#[no_mangle]
+pub unsafe extern "C" fn rsbpe_chat_encoder_reset_stats(encoder: *mut RsBpeChatEncoder) {
+    if !encoder.is_null() {
+        (*encoder).inner.reset_stats();
+    }
 }
 
 /// Encode a JSON-encoded array of messages using the ChatEncoder.
@@ -298,6 +383,62 @@ pub unsafe extern "C" fn rsbpe_chat_encoder_encode(
         }
         Err(_) => RsBpeEncodeResult {
             tokens: std::ptr::null_mut(),
+            len: 0,
+            error_code: 3,
+        },
+    }
+}
+
+/// Encode messages using a ChatEncoder, returning a borrowed pointer to the
+/// encoder's internal buffer (zero-copy).
+///
+/// # Safety contract
+/// - `encoder` must be a valid pointer from `rsbpe_chat_encoder_new*`.
+/// - `json_ptr` must point to `json_len` valid bytes.
+/// - The returned `tokens` pointer is NOT caller-owned. It points into the
+///   encoder's internal buffer and is valid only until the next mutating call
+///   on `encoder` (including another encode call).
+/// - The caller must NOT call `rsbpe_free_tokens` on the returned pointer.
+/// - This function is NOT thread-safe for the same encoder instance.
+#[no_mangle]
+pub unsafe extern "C" fn rsbpe_chat_encoder_encode_borrowed(
+    encoder: *mut RsBpeChatEncoder,
+    json_ptr: *const c_char,
+    json_len: usize,
+    add_generation_prompt: i32,
+) -> RsBpeBorrowedResult {
+    if encoder.is_null() || json_ptr.is_null() {
+        return RsBpeBorrowedResult {
+            tokens: std::ptr::null(),
+            len: 0,
+            error_code: 2,
+        };
+    }
+
+    let enc = &mut *encoder;
+    let bytes = slice::from_raw_parts(json_ptr as *const u8, json_len);
+    let messages: Vec<kimi_k2_mod::Message> = match serde_json::from_slice(bytes) {
+        Ok(m) => m,
+        Err(_) => {
+            return RsBpeBorrowedResult {
+                tokens: std::ptr::null(),
+                len: 0,
+                error_code: 2,
+            };
+        }
+    };
+
+    match enc
+        .inner
+        .encode_messages_ref(&messages, None, add_generation_prompt != 0)
+    {
+        Ok(slice) => RsBpeBorrowedResult {
+            tokens: slice.as_ptr(),
+            len: slice.len(),
+            error_code: 0,
+        },
+        Err(_) => RsBpeBorrowedResult {
+            tokens: std::ptr::null(),
             len: 0,
             error_code: 3,
         },
